@@ -45,6 +45,8 @@ class PanelTree(app_commands.CommandTree):
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         bot: PanelBot = interaction.client  # type: ignore[assignment]
+        if interaction.command is not None and interaction.command.name == "help":
+            return True
         if interaction.channel_id != bot.cfg["configure_channel_id"]:
             await interaction.response.send_message(f"Use my commands in <#{bot.cfg['configure_channel_id']}>.", ephemeral=True)
             return False
@@ -147,18 +149,55 @@ class PanelBot(commands.Bot):
         mc.on("state", self._on_state)
         mc.on("exit", self._on_exit)
 
+    def invite_url(self) -> str:
+        perms = discord.Permissions(view_channel=True, send_messages=True, embed_links=True, read_message_history=True,
+                                    add_reactions=True, attach_files=True, manage_webhooks=True)
+        return discord.utils.oauth_url(self.user.id, permissions=perms, scopes=("bot", "applications.commands"))
+
+    async def sync_commands(self) -> str:
+        """Register slash commands instantly in the server(s). Does NOT need access to the configure channel."""
+        ch = self.get_channel(self.cfg["configure_channel_id"])
+        guilds = [ch.guild] if ch is not None and getattr(ch, "guild", None) else list(self.guilds)
+        if not guilds:
+            raise RuntimeError("The bot is not in any server – invite it with the link printed in the log.")
+        done = []
+        for g in guilds:
+            self.tree.copy_global_to(guild=g)
+            synced = await self.tree.sync(guild=g)
+            done.append(f"{g.name} ({len(synced)} commands)")
+        return ", ".join(done)
+
+    def check_channels(self) -> None:
+        """Log clear warnings when the bot cannot see/use one of the configured channels."""
+        for key, label in (("panel_channel_id", "panel"), ("crosschat_channel_id", "cross-chat"),
+                           ("console_channel_id", "console"), ("configure_channel_id", "configure")):
+            ch = self.get_channel(self.cfg[key])
+            if ch is None:
+                log.warning("Cannot see the %s channel (%s) – give the bot's role 'View Channel' there.", label, self.cfg[key])
+                continue
+            perms = ch.permissions_for(ch.guild.me)
+            need = {"view_channel": "View Channel", "send_messages": "Send Messages",
+                    "embed_links": "Embed Links", "read_message_history": "Read Message History"}
+            missing = [n for k, n in need.items() if not getattr(perms, k)]
+            if key == "crosschat_channel_id" and not perms.manage_webhooks:
+                missing.append("Manage Webhooks (for player-head chat)")
+            if missing:
+                log.warning("Missing permissions in the %s channel: %s", label, ", ".join(missing))
+
     async def on_ready(self) -> None:
         if self._ready_once:
             return
         self._ready_once = True
         log.info("Logged in as %s", self.user)
+        log.info("Invite link (use this if slash commands don't appear): %s", self.invite_url())
+        self.check_channels()
         try:
-            guild = (await self.fetch_channel(self.cfg["configure_channel_id"])).guild
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info("Slash commands synced to %s", guild.name)
+            log.info("Slash commands synced: %s", await self.sync_commands())
+        except discord.Forbidden:
+            log.error("Discord refused to register slash commands (Missing Access). The bot was invited WITHOUT the "
+                      "'applications.commands' scope. Re-invite it with this link (no need to kick it first):\n%s", self.invite_url())
         except Exception:  # noqa: BLE001
-            log.exception("Could not sync commands – is the configure channel ID right and the bot invited with applications.commands?")
+            log.exception("Slash command sync failed")
         await self._init_panel()
         self.panel_loop.start()
         self.console_loop.start()
@@ -237,6 +276,17 @@ class PanelBot(commands.Bot):
     async def on_message(self, message: discord.Message) -> None:
         if message.author.bot or message.guild is None:
             return
+        if self.user and message.content.startswith((f"<@{self.user.id}>", f"<@!{self.user.id}>")) and self.is_op(message.author):
+            word = message.content.split(">", 1)[1].strip().lower()
+            if word == "sync":
+                try:
+                    return await message.reply(f"✅ Slash commands synced: {await self.sync_commands()}\nPress **Ctrl+R** (or restart Discord) if they don't show yet.", mention_author=False)
+                except discord.Forbidden:
+                    return await message.reply(f"❌ Missing Access – re-invite me with the `applications.commands` scope:\n<{self.invite_url()}>", mention_author=False)
+                except Exception as e:  # noqa: BLE001
+                    return await message.reply(f"❌ Sync failed: {e}", mention_author=False)
+            if word == "invite":
+                return await message.reply(f"<{self.invite_url()}>", mention_author=False)
         if message.channel.id != self.cfg["console_channel_id"] or not self.is_op(message.author):
             return
         cmd = message.content.strip().split("\n")[0].lstrip("/").strip()

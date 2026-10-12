@@ -375,10 +375,87 @@ def fmt_size(n: float) -> str:
     return f"{n:.1f} TB"
 
 
+# ───────────────────────────── help ─────────────────────────────
+def help_pages(bot) -> dict:
+    cfg = bot.cfg
+    return {
+        "start": ("🚀 Getting started", 0x57F287, [
+            ("The panel", f"In <#{cfg['panel_channel_id']}> press **▶️ Start** (anyone). **⏹️ Stop** and **🔄 Restart** need the OP role."),
+            ("Commands", f"Type `/` in <#{cfg['configure_channel_id']}> (OP role only). Most changes need a restart: `/server restart`."),
+            ("Console", f"Type a Minecraft command in <#{cfg['console_channel_id']}> (without `/`) to run it. OP role only."),
+            ("Cross-chat", f"<#{cfg['crosschat_channel_id']}> is Minecraft ⇄ Discord chat, handled by the DiscordSRV plugin."),
+            ("Commands missing?", "Press **Ctrl+R** in Discord, or mention me with `@bot sync`. `@bot invite` gives the invite link."),
+        ]),
+        "server": ("🖥️ Server", 0x5865F2, [
+            ("/server `action`", "start · stop · restart · kill (kill = force stop)."),
+            ("/autoshut `[enabled]` `[minutes]`", "Stops the server when nobody is online. `/autoshut` alone toggles it. Default 3 min."),
+            ("/autorestart `hours`", "Restart every N hours (0 = off)."),
+            ("/ram `amount`", "e.g. `/ram 4G`. Applies on next start."),
+            ("/version `[version]`", "Show or change the Minecraft version (server must be offline, backup is made first)."),
+            ("/motd `text`", "Server-list text. `&a` = colours, `\\n` = second line."),
+            ("/icon `[image]`", "Server-list picture (auto 64×64). No image = default."),
+        ]),
+        "plugins": ("🧩 Plugins", 0x1BD96A, [
+            ("/plugin", "Menu: 🔍 search & install from Modrinth · 📦 installed / remove · ⬆️ update all."),
+            ("/plugin_upload `file`", "Upload your own `.jar` plugin."),
+            ("Restart needed", "Installed or removed plugins load after `/server restart`."),
+        ]),
+        "settings": ("⚙️ Settings", 0xFEE75C, [
+            ("/settings", "Pick a setting from the menus: difficulty, gamemode, PvP, max players, view distance, whitelist…"),
+            ("Game rules", "Keep inventory, mob griefing, sleeping %, daylight cycle… applied live and on every start."),
+            ("Properties", "Most apply after a restart. Difficulty, default gamemode and whitelist apply live."),
+        ]),
+        "world": ("🌍 World & backups", 0xE67E22, [
+            ("/world upload `file` or `url`", "Replace the world with a `.zip` (server offline). Old world is backed up first."),
+            ("/world reset", "Delete the world and generate a new one (backup first)."),
+            ("/backup create · list", "Create a backup (works while online) / list backups."),
+            ("/backup restore · delete `name`", "Restore (server offline) or delete a backup."),
+            ("/backup schedule `hours` `[keep]`", "Automatic backups while online (0 = off)."),
+        ]),
+        "players": ("👥 Players", 0xEB459E, [
+            ("/players", "Who is online."),
+            ("/whitelist `action` `[player]`", "add · remove · list · on · off. Bedrock names start with `.`"),
+            ("/op · /deop `player`", "Give / remove in-game operator."),
+            ("/kick · /ban `player` `[reason]`", "Kick or ban."),
+            ("/pardon `player`", "Unban."),
+            ("/command `command`", "Run any console command and see the output."),
+        ]),
+    }
+
+
+def help_embed(bot, key: str) -> discord.Embed:
+    title, colour, fields = help_pages(bot)[key]
+    e = discord.Embed(title=title, colour=colour)
+    for name, value in fields:
+        e.add_field(name=name, value=value, inline=False)
+    e.set_footer(text="Use the menu below to browse topics")
+    return e
+
+
+class HelpSelect(discord.ui.Select):
+    def __init__(self, bot):
+        super().__init__(placeholder="📖 Choose a topic…", options=[
+            discord.SelectOption(label=v[0][2:].strip(), value=k, emoji=v[0][0]) for k, v in help_pages(bot).items()])
+        self.bot = bot
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(embed=help_embed(self.bot, self.values[0]), view=HelpView(self.bot))
+
+
+class HelpView(discord.ui.View):
+    def __init__(self, bot):
+        super().__init__(timeout=600)
+        self.add_item(HelpSelect(bot))
+
+
 # ───────────────────────────── cog ─────────────────────────────
 class Configure(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    @app_commands.command(name="help", description="Easy guide to every command and feature")
+    async def help_cmd(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=help_embed(self.bot, "start"), view=HelpView(self.bot), ephemeral=True)
 
     # helpers
     async def _cmd(self, interaction: discord.Interaction, command: str, wait: float = 1.5):

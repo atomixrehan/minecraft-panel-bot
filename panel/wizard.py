@@ -59,6 +59,7 @@ def ask_token(cfg: Config) -> str:
         st, data = api("/users/@me", token)
         if st == 200:
             say(f"  {G}✓ Logged in as {data.get('username')}{X}")
+            say(f"  Invite the bot (needs the applications.commands scope):\n  {B}https://discord.com/oauth2/authorize?client_id={data.get('id')}&permissions=536955968&scope=bot%20applications.commands{X}")
             return token
         if st == 0:
             say(f"  {Y}! Could not reach Discord to verify the token – continuing.{X}")

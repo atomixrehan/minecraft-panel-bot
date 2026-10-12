@@ -40,6 +40,10 @@ plugins: **Install recommended** (Geyser, Floodgate, ViaVersion, ViaBackwards, V
 | Configure | All slash commands (OP only, only usable here). |
 
 ## Slash commands (configure channel)
+Type **`/help`** for an interactive guide (works anywhere). If commands don't show up: press **Ctrl+R**, or mention the bot with `@bot sync`
+(`@bot invite` prints the invite link). The invite link is also printed in the log at every start and by the wizard –
+the bot **must** be invited with the `applications.commands` scope. Make sure the bot's role can **view** all four channels.
+
 `/server` start·stop·restart·kill · `/autoshut` · `/autorestart` · `/plugin` (search/install/remove/update all) · `/plugin_upload` ·
 `/settings` (server properties + game rules) · `/motd` (server-list text, `&a` colours, `\n` 2nd line) · `/icon` (server-list picture, auto 64×64) ·
 `/ram` · `/version` (change Minecraft version, auto-backup) · `/world upload` (replace world from .zip attachment or direct link) · `/world reset` ·
