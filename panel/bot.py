@@ -1,0 +1,339 @@
+from __future__ import annotations
+
+import asyncio
+import logging
+import time
+from collections import deque
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands, tasks
+
+from . import installer
+from .config import Config
+from .configure import Configure
+from .server import ServerManager
+
+log = logging.getLogger("panel.bot")
+
+STATE_STYLE = {
+    "offline": ("🔴", "Offline", 0xED4245),
+    "starting": ("🟡", "Starting…", 0xFEE75C),
+    "online": ("🟢", "Online", 0x57F287),
+    "stopping": ("🟠", "Stopping…", 0xE67E22),
+}
+NO_PINGS = discord.AllowedMentions.none()
+
+
+def fmt_uptime(seconds: float) -> str:
+    """Coarse on purpose: 'Just now', '1 min', '5 mins', '1 hr', '2 hrs 5 min', '1 d 3 hr'."""
+    m = int(seconds // 60)
+    if m < 1:
+        return "Just now"
+    if m < 60:
+        return f"{m} min" if m == 1 else f"{m} mins"
+    h, m = divmod(m, 60)
+    if h >= 24:
+        d, h = divmod(h, 24)
+        return f"{d} d" + (f" {h} hr" if h else "")
+    return (f"{h} hr" if h == 1 else f"{h} hrs") + (f" {m} min" if m else "")
+
+
+class PanelTree(app_commands.CommandTree):
+    """All slash commands: configure channel + OP role only."""
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        bot: PanelBot = interaction.client  # type: ignore[assignment]
+        if interaction.channel_id != bot.cfg["configure_channel_id"]:
+            await interaction.response.send_message(f"Use my commands in <#{bot.cfg['configure_channel_id']}>.", ephemeral=True)
+            return False
+        if not bot.is_op(interaction.user):
+            await interaction.response.send_message("⛔ You need the OP role to use this.", ephemeral=True)
+            return False
+        return True
+
+    async def on_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError) -> None:
+        err = getattr(error, "original", error)
+        log.error("command error: %r", err, exc_info=err)
+        msg = f"❌ {err}"
+        try:
+            if interaction.response.is_done():
+                await interaction.followup.send(msg, ephemeral=True)
+            else:
+                await interaction.response.send_message(msg, ephemeral=True)
+        except discord.HTTPException:
+            pass
+
+
+class PanelView(discord.ui.View):
+    def __init__(self, bot: "PanelBot"):
+        super().__init__(timeout=None)
+        self.bot = bot
+        st = bot.mc.state
+        self.btn_start.disabled = st != "offline"
+        self.btn_stop.disabled = st in ("offline", "stopping")
+        self.btn_restart.disabled = st != "online"
+
+    @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success, custom_id="panel:start")
+    async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.defer(ephemeral=True)
+        ok, msg = await self.bot.mc.start()
+        log.info("%s pressed Start", interaction.user)
+        await interaction.followup.send(("✅ " if ok else "⚠️ ") + msg, ephemeral=True)
+
+    @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="panel:stop")
+    async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.bot.is_op(interaction.user):
+            return await interaction.response.send_message("⛔ Only the OP role can stop the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        log.info("%s pressed Stop", interaction.user)
+        ok, msg = await self.bot.mc.stop()
+        await interaction.followup.send(("✅ " if ok else "⚠️ ") + msg, ephemeral=True)
+
+    @discord.ui.button(label="Restart", emoji="🔄", style=discord.ButtonStyle.primary, custom_id="panel:restart")
+    async def btn_restart(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not self.bot.is_op(interaction.user):
+            return await interaction.response.send_message("⛔ Only the OP role can restart the server.", ephemeral=True)
+        await interaction.response.defer(ephemeral=True)
+        log.info("%s pressed Restart", interaction.user)
+        ok, msg = await self.bot.mc.restart()
+        await interaction.followup.send(("✅ " if ok else "⚠️ ") + msg, ephemeral=True)
+
+
+class PanelBot(commands.Bot):
+    """Panel + console + slash commands. Cross-chat is handled by the DiscordSRV plugin."""
+
+    def __init__(self, cfg: Config):
+        intents = discord.Intents.default()
+        intents.message_content = True
+        super().__init__(command_prefix=commands.when_mentioned, intents=intents,
+                         tree_cls=PanelTree, help_command=None)
+        self.cfg = cfg
+        self.mc = ServerManager(cfg)
+        self.versions: list = []
+        self.panel_msg: Optional[discord.Message] = None
+        self.console_q: deque = deque(maxlen=600)
+        self._panel_lock = asyncio.Lock()
+        self._last_embed: Optional[dict] = None
+        self._dirty = False
+        self._tick = 0
+        self._ready_once = False
+        self._restarting = False
+        self._backing_up = False
+
+    # ── helpers ─────────────────────────────────────────────
+    def is_op(self, user) -> bool:
+        return isinstance(user, discord.Member) and any(r.id == self.cfg["op_role_id"] for r in user.roles)
+
+    async def chan(self, key: str):
+        cid = self.cfg[key]
+        return self.get_channel(cid) or await self.fetch_channel(cid)
+
+    async def send_console(self, text: str) -> None:
+        try:
+            await (await self.chan("console_channel_id")).send(text[:1900], allowed_mentions=NO_PINGS)
+        except discord.HTTPException:
+            pass
+
+    # ── startup ─────────────────────────────────────────────
+    async def setup_hook(self) -> None:
+        self.add_view(PanelView(self))
+        await self.add_cog(Configure(self))
+        mc = self.mc
+        mc.on("line", lambda l: self.console_q.append(l))
+        mc.on("join", lambda n: setattr(self, "_dirty", True))
+        mc.on("leave", lambda n: setattr(self, "_dirty", True))
+        mc.on("state", self._on_state)
+        mc.on("exit", self._on_exit)
+
+    async def on_ready(self) -> None:
+        if self._ready_once:
+            return
+        self._ready_once = True
+        log.info("Logged in as %s", self.user)
+        try:
+            guild = (await self.fetch_channel(self.cfg["configure_channel_id"])).guild
+            self.tree.copy_global_to(guild=guild)
+            await self.tree.sync(guild=guild)
+            log.info("Slash commands synced to %s", guild.name)
+        except Exception:  # noqa: BLE001
+            log.exception("Could not sync commands – is the configure channel ID right and the bot invited with applications.commands?")
+        await self._init_panel()
+        self.panel_loop.start()
+        self.console_loop.start()
+        self.maintenance.start()
+        asyncio.ensure_future(self._load_versions())
+
+    async def _load_versions(self) -> None:
+        try:
+            self.versions = await asyncio.to_thread(installer.paper_versions)
+        except Exception:  # noqa: BLE001
+            log.warning("Could not load Paper version list")
+
+    async def _init_panel(self) -> None:
+        mid = self.cfg["panel_message_id"]
+        if mid:
+            try:
+                self.panel_msg = await (await self.chan("panel_channel_id")).fetch_message(mid)
+            except discord.HTTPException:
+                self.panel_msg = None
+        await self.update_panel(force=True)
+
+    # ── panel (minimal: status, player count, version, uptime) ──
+    def build_embed(self) -> discord.Embed:
+        mc, cfg = self.mc, self.cfg
+        emoji, label, color = STATE_STYLE[mc.state]
+        e = discord.Embed(title="⛏️  Minecraft Server", colour=color)
+        e.add_field(name="Status", value=f"{emoji} **{label}**")
+        e.add_field(name="Players", value=f"👥 **{len(mc.players)}** / {mc.max_players()}")
+        e.add_field(name="Version", value=f"🧩 Paper `{cfg['mc_version'] or '?'}`")
+        if mc.state == "online" and mc.online_at:
+            e.add_field(name="Uptime", value=f"⏱️ {fmt_uptime(time.time() - mc.online_at)}")
+        a = cfg["autoshut"]
+        e.set_footer(text=f"💤 Auto-shutdown after {a['minutes']} min without players" if a["enabled"] else "💤 Auto-shutdown: off")
+        return e
+
+    async def update_panel(self, force: bool = False) -> None:
+        async with self._panel_lock:
+            embed = self.build_embed()
+            d = embed.to_dict()
+            if not force and d == self._last_embed:
+                return  # nothing visible changed -> no API call
+            view = PanelView(self)
+            try:
+                if self.panel_msg is not None:
+                    try:
+                        await self.panel_msg.edit(embed=embed, view=view, attachments=[])
+                    except discord.NotFound:
+                        self.panel_msg = None
+                if self.panel_msg is None:
+                    self.panel_msg = await (await self.chan("panel_channel_id")).send(embed=embed, view=view)
+                    self.cfg["panel_message_id"] = self.panel_msg.id
+                    self.cfg.save()
+                self._last_embed = d
+            except discord.HTTPException:
+                log.exception("panel update failed")
+
+    @tasks.loop(seconds=5)
+    async def panel_loop(self) -> None:
+        try:
+            self._tick += 1
+            # Edits only happen when the text changes (uptime is minute-granular).
+            if self._dirty or self._tick % 6 == 0:
+                self._dirty = False
+                await self.update_panel()
+        except Exception:  # noqa: BLE001
+            log.exception("panel loop")
+
+    async def _on_state(self, state: str) -> None:
+        await self.update_panel(force=True)
+
+    async def _on_exit(self, code: int, crashed: bool) -> None:
+        if crashed:
+            await self.send_console(f"⚠️ **Server crashed** (exit code `{code}`). Check `server/logs/latest.log`.")
+
+    # ── console channel: OP messages run as commands ────────
+    async def on_message(self, message: discord.Message) -> None:
+        if message.author.bot or message.guild is None:
+            return
+        if message.channel.id != self.cfg["console_channel_id"] or not self.is_op(message.author):
+            return
+        cmd = message.content.strip().split("\n")[0].lstrip("/").strip()
+        if not cmd:
+            return
+        if self.mc.state == "offline":
+            return await message.reply("⚠️ Server is offline. Use the panel to start it.", mention_author=False)
+        try:
+            await self.mc.send(cmd)
+            await message.add_reaction("✅")
+        except Exception as e:  # noqa: BLE001
+            await message.reply(f"❌ {e}", mention_author=False)
+
+    @tasks.loop(seconds=2)
+    async def console_loop(self) -> None:
+        try:
+            if not self.console_q:
+                return
+            lines = []
+            while self.console_q:
+                lines.append(self.console_q.popleft()[:1500].replace("```", "'''"))
+            chunks, cur = [], ""
+            for ln in lines:
+                if len(cur) + len(ln) + 1 > 1850:
+                    chunks.append(cur)
+                    cur = ""
+                cur += ln + "\n"
+            if cur:
+                chunks.append(cur)
+            skipped = 0
+            if len(chunks) > 5:
+                skipped, chunks = len(chunks) - 5, chunks[-5:]
+            ch = await self.chan("console_channel_id")
+            if skipped:
+                await ch.send(f"*…skipped {skipped} chunk(s) of output (see server/logs/latest.log)*")
+            for c in chunks:
+                await ch.send(f"```\n{c}```", allowed_mentions=NO_PINGS)
+        except Exception:  # noqa: BLE001
+            log.exception("console loop")
+
+    # ── background maintenance ──────────────────────────────
+    @tasks.loop(seconds=15)
+    async def maintenance(self) -> None:
+        try:
+            mc, cfg = self.mc, self.cfg
+            if mc.state != "online":
+                return
+            a = cfg["autoshut"]
+            if a["enabled"] and not mc.players and mc.empty_since and time.time() - mc.empty_since >= a["minutes"] * 60:
+                await self.send_console(f"💤 No players for {a['minutes']} min – shutting the server down to save resources.")
+                await mc.stop()
+                return
+            hrs = cfg["autorestart_hours"]
+            if hrs and mc.online_at and not self._restarting and time.time() - mc.online_at >= hrs * 3600:
+                asyncio.ensure_future(self._auto_restart())
+            bh = cfg["backup_hours"]
+            if bh and not self._backing_up and time.time() - cfg["last_backup"] >= bh * 3600:
+                asyncio.ensure_future(self._scheduled_backup())
+        except Exception:  # noqa: BLE001
+            log.exception("maintenance")
+
+    async def _auto_restart(self) -> None:
+        self._restarting = True
+        try:
+            await self.send_console("🔁 Scheduled restart in 60 seconds.")
+            await self.mc.send("say Scheduled restart in 60 seconds!")
+            await asyncio.sleep(60)
+            if self.mc.state == "online":
+                await self.mc.restart()
+        except Exception:  # noqa: BLE001
+            log.exception("auto restart")
+        finally:
+            self._restarting = False
+
+    async def _scheduled_backup(self) -> None:
+        self._backing_up = True
+        try:
+            path = await self.mc.backup()
+            await self.send_console(f"💾 Scheduled backup created: `{path.name}`")
+        except Exception as e:  # noqa: BLE001
+            await self.send_console(f"❌ Scheduled backup failed: {e}")
+        finally:
+            self._backing_up = False
+
+    async def close(self) -> None:
+        try:
+            await self.mc.shutdown()
+        finally:
+            await super().close()
+
+
+def main(cfg: Config) -> None:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
+    bot = PanelBot(cfg)
+    try:
+        bot.run(cfg["token"], log_handler=None)
+    except discord.LoginFailure:
+        raise SystemExit("Invalid bot token. Run ./start.sh --setup to re-enter it.")
+    except discord.PrivilegedIntentsRequired:
+        raise SystemExit("Enable 'Message Content Intent' for your bot in the Discord Developer Portal → Bot.")
