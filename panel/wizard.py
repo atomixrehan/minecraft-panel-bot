@@ -182,27 +182,65 @@ def run(cfg: Config) -> None:
     say("Open ports on your firewall/host: TCP 25565 (Java)" + (" and UDP 19132 (Bedrock)" if "geyser" in plugins else "") + ".\n")
 
 
+def migrate(cfg: Config) -> None:
+    """Drop settings/files from older versions (the existing panel message id is KEPT, so it is edited, not re-posted)."""
+    from .config import DATA_DIR
+    for key in ("panel_title", "panel_note", "server_address"):
+        cfg.data.pop(key, None)
+    (DATA_DIR / "panel_icon.png").unlink(missing_ok=True)
+    cfg.save()
+
+
 def update(cfg: Config) -> None:
     """Keep config, world and plugins; update Paper build + plugins + wiring."""
     say(f"\n{B}══════════ Updating ══════════{X}")
+    problems = 0
+    migrate(cfg)
     version = cfg["mc_version"]
-    try:
-        say(f"Checking Paper {version} for a newer build…")
-        say("  " + (f"{G}✓ updated{X}" if installer.update_server_build(version, say) else "already on the latest build"))
-    except Exception as e:  # noqa: BLE001
-        say(f"  {Y}! Paper update skipped: {e}{X}")
-    present = {m.get("project_id") for m in installer.load_index().values()}
-    for core in installer.CORE_PLUGINS:  # e.g. DiscordSRV added in newer versions
-        if core not in present and not any(core in f.name.lower() for f in installer.PLUGIN_DIR.glob("*.jar")):
+    if not version:
+        say(f"  {Y}! No Minecraft version in config.json – skipping the Paper update.{X}")
+        problems += 1
+    else:
+        try:
+            say(f"Checking Paper {version} for a newer build…")
+            say("  " + (f"{G}✓ updated{X}" if installer.update_server_build(version, say) else "already on the latest build"))
+        except Exception as e:  # noqa: BLE001
+            problems += 1
+            say(f"  {Y}! Paper update skipped: {e}{X}")
+    newly_installed = False
+    for core in installer.CORE_PLUGINS:  # e.g. DiscordSRV, added in newer versions
+        have = any(core in f.name.lower() for f in installer.PLUGIN_DIR.glob("*.jar")) if installer.PLUGIN_DIR.exists() else False
+        if not have:
             say(f"Installing missing core plugin: {core}")
-            installer.install_many([core], version, say)
+            try:
+                installer.install_many([core], version, say)
+            except Exception as e:  # noqa: BLE001
+                say(f"  {Y}! {core}: {e}{X}")
+            if any(core in f.name.lower() for f in installer.PLUGIN_DIR.glob("*.jar")):
+                newly_installed = True
+            else:
+                problems += 1
+                say(f"  {Y}! {core} could not be installed – cross-chat won't work until it is. Re-run the update when online.{X}")
     say("Updating plugins…")
-    updated = installer.update_all(version, say)
-    say("  " + (", ".join(updated) if updated else "all plugins up to date"))
-    installer.ensure_server_icon(say)
-    if installer.patch_configs(cfg):
-        say("  plugin configs re-wired")
-    say(f"\n{G}✓ Update complete.{X} Your config, world and backups were kept.\n")
+    try:
+        updated = installer.update_all(version, say)
+        say("  " + (", ".join(updated) if updated else "all plugins up to date"))
+    except Exception as e:  # noqa: BLE001
+        problems += 1
+        say(f"  {Y}! Plugin update failed: {e}{X}")
+    try:
+        installer.ensure_server_icon(say)
+        if newly_installed and cfg["eula"]:
+            installer.bootstrap(cfg, say)   # first boot generates the new plugin's config, then it is wired up
+        elif installer.patch_configs(cfg):
+            say("  plugin configs re-wired")
+    except Exception as e:  # noqa: BLE001
+        problems += 1
+        say(f"  {Y}! Config wiring failed: {e}{X}")
+    if problems:
+        say(f"\n{Y}Update finished with {problems} warning(s) – see above. Config, world and backups were kept.{X}\n")
+    else:
+        say(f"\n{G}✓ Update complete.{X} Config, world and backups were kept; the existing panel message will be edited, not re-posted.\n")
 
 
 def cleanup(cfg: Config) -> None:

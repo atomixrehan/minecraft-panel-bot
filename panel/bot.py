@@ -25,6 +25,13 @@ STATE_STYLE = {
     "stopping": ("🟠", "Stopping…", 0xE67E22),
 }
 NO_PINGS = discord.AllowedMentions.none()
+PANEL_TITLE = "⛏️  Minecraft Server"
+STATE_HINT = {
+    "offline": "Press **▶️ Start** to boot the server.",
+    "starting": "⏳ Booting up – usually about a minute…",
+    "online": "✨ Ready to play!",
+    "stopping": "💾 Saving the world and shutting down…",
+}
 
 
 def fmt_uptime(seconds: float) -> str:
@@ -78,30 +85,31 @@ class PanelView(discord.ui.View):
         self.btn_stop.disabled = st in ("offline", "stopping")
         self.btn_restart.disabled = st != "online"
 
+    async def _run(self, interaction: discord.Interaction, action) -> None:
+        # Acknowledge silently (no "thinking" bubble, no ephemeral clutter): the panel message edits itself instantly.
+        await interaction.response.defer()
+        ok, msg = await action()
+        if not ok:
+            await interaction.followup.send("⚠️ " + msg, ephemeral=True)
+
     @discord.ui.button(label="Start", emoji="▶️", style=discord.ButtonStyle.success, custom_id="panel:start")
     async def btn_start(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.defer(ephemeral=True)
-        ok, msg = await self.bot.mc.start()
         log.info("%s pressed Start", interaction.user)
-        await interaction.followup.send(("✅ " if ok else "⚠️ ") + msg, ephemeral=True)
+        await self._run(interaction, self.bot.mc.start)
 
     @discord.ui.button(label="Stop", emoji="⏹️", style=discord.ButtonStyle.danger, custom_id="panel:stop")
     async def btn_stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.bot.is_op(interaction.user):
             return await interaction.response.send_message("⛔ Only the OP role can stop the server.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
         log.info("%s pressed Stop", interaction.user)
-        ok, msg = await self.bot.mc.stop()
-        await interaction.followup.send(("✅ " if ok else "⚠️ ") + msg, ephemeral=True)
+        await self._run(interaction, self.bot.mc.stop)
 
     @discord.ui.button(label="Restart", emoji="🔄", style=discord.ButtonStyle.primary, custom_id="panel:restart")
     async def btn_restart(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not self.bot.is_op(interaction.user):
             return await interaction.response.send_message("⛔ Only the OP role can restart the server.", ephemeral=True)
-        await interaction.response.defer(ephemeral=True)
         log.info("%s pressed Restart", interaction.user)
-        ok, msg = await self.bot.mc.restart()
-        await interaction.followup.send(("✅ " if ok else "⚠️ ") + msg, ephemeral=True)
+        await self._run(interaction, self.bot.mc.restart)
 
 
 class PanelBot(commands.Bot):
@@ -120,6 +128,7 @@ class PanelBot(commands.Bot):
         self.console_q: deque = deque(maxlen=600)
         self._panel_lock = asyncio.Lock()
         self._last_embed: Optional[dict] = None
+        self._last_edit = 0.0
         self._dirty = False
         self._tick = 0
         self._ready_once = False
@@ -146,8 +155,8 @@ class PanelBot(commands.Bot):
         await self.add_cog(Configure(self))
         mc = self.mc
         mc.on("line", lambda l: self.console_q.append(l))
-        mc.on("join", lambda n: setattr(self, "_dirty", True))
-        mc.on("leave", lambda n: setattr(self, "_dirty", True))
+        mc.on("join", lambda n: self.request_update())
+        mc.on("leave", lambda n: self.request_update())
         mc.pre_start.append(self.wake.close)
         mc.on("state", self._on_state)
         mc.on("exit", self._on_exit)
@@ -215,19 +224,51 @@ class PanelBot(commands.Bot):
             log.warning("Could not load Paper version list")
 
     async def _init_panel(self) -> None:
+        """Find the ONE existing panel message and reuse it. A new one is only posted if none exists."""
+        try:
+            ch = await self.chan("panel_channel_id")
+        except discord.HTTPException as e:
+            log.error("Cannot access the panel channel (%s): %s – give the bot View Channel + Send Messages there.", self.cfg["panel_channel_id"], e)
+            return
+        msg: Optional[discord.Message] = None
         mid = self.cfg["panel_message_id"]
         if mid:
             try:
-                self.panel_msg = await (await self.chan("panel_channel_id")).fetch_message(mid)
+                msg = await ch.fetch_message(mid)
+            except discord.NotFound:
+                log.info("Stored panel message %s no longer exists", mid)
+            except discord.Forbidden:
+                log.warning("Cannot read the panel channel history – give the bot 'Read Message History' (otherwise it can't find its panel).")
             except discord.HTTPException:
-                self.panel_msg = None
+                log.exception("Could not fetch the stored panel message")
+        found: list = []  # panels we posted earlier (newest first) – e.g. if the id was lost
+        try:
+            async for m in ch.history(limit=100):
+                if m.author.id == self.user.id and m.embeds and m.embeds[0].title == PANEL_TITLE:
+                    found.append(m)
+        except discord.HTTPException:
+            pass
+        if msg is None and found:
+            msg = found[0]
+            log.info("Re-using existing panel message %s", msg.id)
+        for extra in found:  # keep exactly one panel
+            if msg is not None and extra.id != msg.id:
+                try:
+                    await extra.delete()
+                    log.info("Removed duplicate panel message %s", extra.id)
+                except discord.HTTPException:
+                    pass
+        self.panel_msg = msg
+        if msg is not None and self.cfg["panel_message_id"] != msg.id:
+            self.cfg["panel_message_id"] = msg.id
+            self.cfg.save()
         await self.update_panel(force=True)
 
     # ── panel (minimal: status, player count, version, uptime) ──
     def build_embed(self) -> discord.Embed:
         mc, cfg = self.mc, self.cfg
         emoji, label, color = STATE_STYLE[mc.state]
-        e = discord.Embed(title="⛏️  Minecraft Server", colour=color)
+        e = discord.Embed(title=PANEL_TITLE, description=STATE_HINT[mc.state], colour=color)
         e.add_field(name="Status", value=f"{emoji} **{label}**")
         e.add_field(name="Players", value=f"👥 **{len(mc.players)}** / {mc.max_players()}")
         e.add_field(name="Version", value=f"🧩 Paper `{cfg['mc_version'] or '?'}`")
@@ -238,6 +279,13 @@ class PanelBot(commands.Bot):
                 "🔔 Auto-start on join" if cfg["autostart"] else "🔔 Auto-start off"]
         e.set_footer(text="  ·  ".join(bits))
         return e
+
+    def request_update(self) -> None:
+        """Refresh the panel now (max one edit per 2 s; extra requests are merged by the loop)."""
+        if time.monotonic() - self._last_edit >= 2:
+            asyncio.ensure_future(self.update_panel())
+        else:
+            self._dirty = True
 
     async def update_panel(self, force: bool = False) -> None:
         async with self._panel_lock:
@@ -251,21 +299,24 @@ class PanelBot(commands.Bot):
                     try:
                         await self.panel_msg.edit(embed=embed, view=view, attachments=[])
                     except discord.NotFound:
+                        log.warning("Panel message was deleted – posting a new one")
                         self.panel_msg = None
                 if self.panel_msg is None:
                     self.panel_msg = await (await self.chan("panel_channel_id")).send(embed=embed, view=view)
                     self.cfg["panel_message_id"] = self.panel_msg.id
                     self.cfg.save()
+                    log.info("Posted panel message %s", self.panel_msg.id)
                 self._last_embed = d
+                self._last_edit = time.monotonic()
             except discord.HTTPException:
                 log.exception("panel update failed")
 
-    @tasks.loop(seconds=5)
+    @tasks.loop(seconds=2)
     async def panel_loop(self) -> None:
         try:
             self._tick += 1
-            # Edits only happen when the text changes (uptime is minute-granular).
-            if self._dirty or self._tick % 6 == 0:
+            # Edits only happen when the visible text changes (uptime is minute-granular, checked every 30 s).
+            if self._dirty or self._tick % 15 == 0:
                 self._dirty = False
                 await self.update_panel()
         except Exception:  # noqa: BLE001

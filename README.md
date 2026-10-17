@@ -9,16 +9,36 @@ Runs **Paper**; Java is downloaded automatically (right version for your Minecra
 ```bash
 git clone https://github.com/<you>/minecraft-panel-bot.git
 cd minecraft-panel-bot
-chmod +x setup.sh start.sh
+chmod +x setup.sh start.sh kill.sh
 ./setup.sh
 ```
 
 * **Fresh machine:** installs everything, runs the wizard, offers a systemd service.
 * **Run it again later:** it detects the existing install and asks
-  1. **Update** – keeps config, world, plugins, backups. Pulls new panel code (if a git checkout), refreshes dependencies, updates the Paper build and all plugins, re-wires plugin configs.
-  2. **Clean reinstall** – you must type `DELETE`. Removes config, server (world + plugins), Java and venv (and optionally backups), deletes the old panel message, then runs the wizard again.
+  1. **Update** (`./setup.sh --update` skips the question) – keeps config, world, plugins and backups. It first **stops any running copy** of the bot/server, then pulls new panel code (`git pull`; if the folder came from a ZIP it offers to link it to your GitHub repo), refreshes dependencies, updates the Paper build and all plugins, installs missing core plugins (DiscordSRV), migrates old settings and restarts the service. The existing panel message is **edited, not re-posted**.
+  2. **Clean reinstall** (`./setup.sh --clean`) – you must type `DELETE`. Removes config, server (world + plugins), Java and venv (and optionally backups), deletes the old panel message, then runs the wizard again.
 
 Start manually with `./start.sh`; re-run only the wizard with `./start.sh --setup`.
+Only one bot can run per folder (a lock prevents duplicates, which would otherwise each post a panel).
+
+## ☠️ Kill / uninstall – leave the machine clean
+
+```bash
+./kill.sh
+```
+
+Stops the systemd service, the bot **and** the Minecraft server of this folder (gracefully, then force), deletes the panel message in Discord,
+removes the service file, and deletes everything that was installed: `server/` (world, plugins), `runtime/` (Java), `.venv/`, `data/`, `config.json` (your token).
+It asks (default **No**) before also deleting `backups/`, the source folder itself, and the system packages `setup.sh` installed
+(only packages that were *not* there before – `setup.sh` records them in `.install_state`).
+
+```bash
+./kill.sh --yes             # no questions; keeps backups, source and system packages
+./kill.sh --yes --purge     # no questions; ALSO deletes backups and this whole folder
+./kill.sh --yes --packages  # also removes the system packages setup.sh installed
+```
+
+It only touches processes whose working directory is inside this folder, so other Python/Java programs on the machine are safe.
 
 ### Discord bot setup (once)
 1. https://discord.com/developers/applications → New Application → **Bot** → copy token.
@@ -34,7 +54,7 @@ plugins: **Install recommended** (Geyser, Floodgate, ViaVersion, ViaBackwards, V
 ## Channels
 | Channel | What it does |
 |---|---|
-| Panel | Status, player count, version, uptime (coarse: *Just now, 1 min, 2 mins, 1 hr…*). Updates only when something visibly changes. **Start** = everyone, **Stop / Restart** = OP role. |
+| Panel | **One** message that is only ever edited (never re-posted; duplicates from older runs are removed at start). Status, player count, version, uptime (coarse: *Just now, 1 min, 2 mins, 1 hr…*). Updates only when something visibly changes. **Start** = everyone, **Stop / Restart** = OP role. Buttons react instantly – the panel switches to *Starting… / Stopping…* with a hint line, no extra chat messages. |
 | Cross-chat | Handled by **DiscordSRV**: chat both ways, join/leave, advancements, deaths, start/stop messages. Customise in `server/plugins/DiscordSRV/`. |
 | Console | Live server log. OP messages are run as console commands. |
 | Configure | All slash commands (OP only, only usable here). |
@@ -42,7 +62,7 @@ plugins: **Install recommended** (Geyser, Floodgate, ViaVersion, ViaBackwards, V
 ## Slash commands (configure channel)
 Type **`/help`** for an interactive guide (works anywhere). If commands don't show up: press **Ctrl+R**, or mention the bot with `@bot sync`
 (`@bot invite` prints the invite link). The invite link is also printed in the log at every start and by the wizard –
-the bot **must** be invited with the `applications.commands` scope. Make sure the bot's role can **view** all four channels.
+the bot **must** be invited with the `applications.commands` scope. Make sure the bot's role can **view** all four channels, and has **Read Message History** in the panel channel (so it can always find its one panel message).
 
 `/server` start·stop·restart·kill · `/autoshut` · `/autostart` (wake the server when someone tries to join) · `/autorestart` · `/plugin` (search/install/remove/update all) · `/plugin_upload` ·
 `/settings` (server properties + game rules) · `/motd` (server-list text, `&a` colours, `\n` 2nd line) · `/icon` (server-list picture, auto 64×64) ·
