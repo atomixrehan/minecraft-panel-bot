@@ -44,10 +44,16 @@ Type **`/help`** for an interactive guide (works anywhere). If commands don't sh
 (`@bot invite` prints the invite link). The invite link is also printed in the log at every start and by the wizard –
 the bot **must** be invited with the `applications.commands` scope. Make sure the bot's role can **view** all four channels.
 
-`/server` start·stop·restart·kill · `/autoshut` · `/autorestart` · `/plugin` (search/install/remove/update all) · `/plugin_upload` ·
+`/server` start·stop·restart·kill · `/autoshut` · `/autostart` (wake the server when someone tries to join) · `/autorestart` · `/plugin` (search/install/remove/update all) · `/plugin_upload` ·
 `/settings` (server properties + game rules) · `/motd` (server-list text, `&a` colours, `\n` 2nd line) · `/icon` (server-list picture, auto 64×64) ·
 `/ram` · `/version` (change Minecraft version, auto-backup) · `/world upload` (replace world from .zip attachment or direct link) · `/world reset` ·
 `/backup create|list|restore|delete|schedule` · `/players` · `/whitelist` · `/op` `/deop` `/kick` `/ban` `/pardon` · `/command`
+
+## Auto-start on join
+While the server is offline the bot listens on the Minecraft port (25565). The server list shows "Offline – join to start the server!";
+an actual join attempt shows "starting, reconnect in a minute" and boots the server. Pings never start it, and if the whitelist is on only
+whitelisted names can. Toggle with `/autostart`. Java Edition only (Bedrock/Geyser players can use the panel's Start button).
+Combined with `/autoshut` the server sleeps when empty and wakes when someone knocks.
 
 ## Notes
 - Open **TCP 25565** (Java) and **UDP 19132** (Bedrock/Geyser).

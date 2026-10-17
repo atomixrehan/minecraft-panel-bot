@@ -389,6 +389,7 @@ def help_pages(bot) -> dict:
         "server": ("🖥️ Server", 0x5865F2, [
             ("/server `action`", "start · stop · restart · kill (kill = force stop)."),
             ("/autoshut `[enabled]` `[minutes]`", "Stops the server when nobody is online. `/autoshut` alone toggles it. Default 3 min."),
+            ("/autostart `[enabled]`", "Start the server automatically when someone tries to join while it's offline (Java). Toggles if empty."),
             ("/autorestart `hours`", "Restart every N hours (0 = off)."),
             ("/ram `amount`", "e.g. `/ram 4G`. Applies on next start."),
             ("/version `[version]`", "Show or change the Minecraft version (server must be offline, backup is made first)."),
@@ -494,6 +495,22 @@ class Configure(commands.Cog):
         self.bot._dirty = True
         await interaction.response.send_message(
             f"💤 Auto-shutdown is **{'ON' if a['enabled'] else 'OFF'}** – stops the server after **{a['minutes']} min** with no players.",
+            ephemeral=True)
+
+    @app_commands.command(name="autostart", description="Toggle: start the server automatically when someone tries to join")
+    @app_commands.describe(enabled="On/off – leave empty to toggle")
+    async def autostart(self, interaction: discord.Interaction, enabled: Optional[bool] = None):
+        cfg = self.bot.cfg
+        cfg["autostart"] = (not cfg["autostart"]) if enabled is None else enabled
+        cfg.save()
+        await interaction.response.defer(ephemeral=True)
+        await self.bot.wake.sync()
+        self.bot._dirty = True
+        icon = "🔔" if cfg["autostart"] else "🔕"
+        await interaction.followup.send(
+            f"{icon} Auto-start on join is **{'ON' if cfg['autostart'] else 'OFF'}**.\n`{self.bot.wake.status_text()}`\n"
+            "*When the server is offline, joining shows “starting – reconnect in a minute” and boots it. "
+            "Server-list pings never start it. If the whitelist is on, only whitelisted names can wake it. Java Edition only.*",
             ephemeral=True)
 
     @app_commands.command(name="autorestart", description="Restart the server every N hours (0 = off)")

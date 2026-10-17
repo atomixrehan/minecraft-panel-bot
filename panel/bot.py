@@ -14,6 +14,7 @@ from . import installer
 from .config import Config
 from .configure import Configure
 from .server import ServerManager
+from .wake import WakeListener
 
 log = logging.getLogger("panel.bot")
 
@@ -113,6 +114,7 @@ class PanelBot(commands.Bot):
                          tree_cls=PanelTree, help_command=None)
         self.cfg = cfg
         self.mc = ServerManager(cfg)
+        self.wake = WakeListener(self)
         self.versions: list = []
         self.panel_msg: Optional[discord.Message] = None
         self.console_q: deque = deque(maxlen=600)
@@ -146,6 +148,7 @@ class PanelBot(commands.Bot):
         mc.on("line", lambda l: self.console_q.append(l))
         mc.on("join", lambda n: setattr(self, "_dirty", True))
         mc.on("leave", lambda n: setattr(self, "_dirty", True))
+        mc.pre_start.append(self.wake.close)
         mc.on("state", self._on_state)
         mc.on("exit", self._on_exit)
 
@@ -199,6 +202,7 @@ class PanelBot(commands.Bot):
         except Exception:  # noqa: BLE001
             log.exception("Slash command sync failed")
         await self._init_panel()
+        await self.wake.sync()
         self.panel_loop.start()
         self.console_loop.start()
         self.maintenance.start()
@@ -230,7 +234,9 @@ class PanelBot(commands.Bot):
         if mc.state == "online" and mc.online_at:
             e.add_field(name="Uptime", value=f"⏱️ {fmt_uptime(time.time() - mc.online_at)}")
         a = cfg["autoshut"]
-        e.set_footer(text=f"💤 Auto-shutdown after {a['minutes']} min without players" if a["enabled"] else "💤 Auto-shutdown: off")
+        bits = [f"💤 Auto-shutdown {a['minutes']} min" if a["enabled"] else "💤 Auto-shutdown off",
+                "🔔 Auto-start on join" if cfg["autostart"] else "🔔 Auto-start off"]
+        e.set_footer(text="  ·  ".join(bits))
         return e
 
     async def update_panel(self, force: bool = False) -> None:
@@ -267,6 +273,7 @@ class PanelBot(commands.Bot):
 
     async def _on_state(self, state: str) -> None:
         await self.update_panel(force=True)
+        await self.wake.sync()
 
     async def _on_exit(self, code: int, crashed: bool) -> None:
         if crashed:
@@ -373,6 +380,7 @@ class PanelBot(commands.Bot):
 
     async def close(self) -> None:
         try:
+            await self.wake.close()
             await self.mc.shutdown()
         finally:
             await super().close()

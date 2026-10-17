@@ -29,6 +29,7 @@ DEFAULTS: dict = {
     "eula": False,
     "setup_done": False,
     "autoshut": {"enabled": True, "minutes": 3},
+    "autostart": True,             # start the server when someone tries to join while it is offline
     "autorestart_hours": 0,        # 0 = off
     "backup_hours": 0,             # 0 = off
     "max_backups": 10,

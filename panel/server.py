@@ -43,6 +43,7 @@ class ServerManager:
         self.exit_code: Optional[int] = None
         self.stopping = False
         self.callbacks: dict = defaultdict(list)
+        self.pre_start: list = []          # async hooks awaited before the JVM is launched (free the port)
         self._tasks: set = set()
         self._lock = asyncio.Lock()
         self._backup_lock = asyncio.Lock()
@@ -95,6 +96,8 @@ class ServerManager:
                 return False, "server.jar is missing – run `./start.sh --setup`."
             self._set_state("starting")
         try:
+            for hook in self.pre_start:
+                await hook()
             await asyncio.to_thread(installer.patch_configs, self.cfg)  # DiscordSRV token/channel, Geyser auth
             java = await asyncio.to_thread(installer.ensure_java, installer.required_java(self.cfg["mc_version"] or "1.21"), log.info)
             ram = int(self.cfg["ram_mb"])
