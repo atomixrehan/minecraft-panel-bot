@@ -270,7 +270,7 @@ class PanelBot(commands.Bot):
         emoji, label, color = STATE_STYLE[mc.state]
         e = discord.Embed(title=PANEL_TITLE, description=STATE_HINT[mc.state], colour=color)
         e.add_field(name="Status", value=f"{emoji} **{label}**")
-        e.add_field(name="Players", value=f"👥 **{len(mc.players)}** / {mc.max_players()}")
+        e.add_field(name="Players", value=f"👥 **{mc.player_total()}** / {mc.max_players()}")
         e.add_field(name="Version", value=f"🧩 Paper `{cfg['mc_version'] or '?'}`")
         if mc.state == "online" and mc.online_at:
             e.add_field(name="Uptime", value=f"⏱️ {fmt_uptime(time.time() - mc.online_at)}")
@@ -325,6 +325,8 @@ class PanelBot(commands.Bot):
     async def _on_state(self, state: str) -> None:
         await self.update_panel(force=True)
         await self.wake.sync()
+        if state == "online":
+            asyncio.ensure_future(self.wake.record_bedrock())   # remember Geyser's real status for the offline entry
 
     async def _on_exit(self, code: int, crashed: bool) -> None:
         if crashed:
@@ -392,11 +394,31 @@ class PanelBot(commands.Bot):
             mc, cfg = self.mc, self.cfg
             if mc.state != "online":
                 return
+            # Keep the idle timer honest: besides the console log, ask the server itself who is online.
+            if mc.players:
+                mc.empty_since = None
+            else:
+                reported = await mc.query_online()
+                if reported is not None:
+                    mc.count_hint = reported
+                if mc.player_total() > 0:
+                    mc.empty_since = None
+                elif mc.empty_since is None:
+                    mc.empty_since = time.time()
             a = cfg["autoshut"]
-            if a["enabled"] and not mc.players and mc.empty_since and time.time() - mc.empty_since >= a["minutes"] * 60:
-                await self.send_console(f"💤 No players for {a['minutes']} min – shutting the server down to save resources.")
-                await mc.stop()
-                return
+            if a["enabled"] and mc.empty_since and time.time() - mc.empty_since >= a["minutes"] * 60:
+                # Last line of defence: re-count right now. Never stop unless the server CONFIRMS zero players.
+                n = await mc.count_players()
+                if n is None:
+                    log.warning("Auto-shutdown: could not verify the player count – NOT stopping, will re-check")
+                    mc.empty_since = time.time() - a["minutes"] * 60 + 60
+                elif n > 0:
+                    log.info("Auto-shutdown cancelled: the server reports %s player(s) online", n)
+                    mc.count_hint, mc.empty_since = n, None
+                else:
+                    await self.send_console(f"💤 No players for {a['minutes']} min – shutting the server down to save resources.")
+                    await mc.stop()
+                    return
             hrs = cfg["autorestart_hours"]
             if hrs and mc.online_at and not self._restarting and time.time() - mc.online_at >= hrs * 3600:
                 asyncio.ensure_future(self._auto_restart())

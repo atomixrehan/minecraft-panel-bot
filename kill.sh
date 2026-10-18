@@ -42,7 +42,7 @@ main() {
   local c="" ans="" DEL_BACKUPS=false DEL_REPO=false DO_PKGS=false
   echo -e "${C_R}This will STOP and DELETE everything this project put on this machine:${C_0}"
   echo "   • the systemd service (if installed) and any running bot / Minecraft server of this folder"
-  echo "   • server/ (WORLD, plugins, configs)   runtime/ (downloaded Java)   .venv/   data/   config.json (bot token)"
+  echo "   • server/ (WORLD, plugins, configs)   runtime/ (downloaded Java)   .venv/   data/   logs/   config.json (bot token)"
   echo "   • the panel message in Discord"
   echo "   optional: backups/, this whole folder, and the system packages setup.sh installed"
   echo
@@ -75,7 +75,7 @@ main() {
   fi
 
   info "Deleting installed files…"
-  rm -rf .venv server runtime data config.json config.tmp ./*.part
+  rm -rf .venv server runtime data logs config.json config.json.bak config.tmp ./*.part
   find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
   $DEL_BACKUPS && rm -rf backups
   ok "Files deleted"

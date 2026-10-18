@@ -9,17 +9,34 @@ Runs **Paper**; Java is downloaded automatically (right version for your Minecra
 ```bash
 git clone https://github.com/<you>/minecraft-panel-bot.git
 cd minecraft-panel-bot
-chmod +x setup.sh start.sh kill.sh
+chmod +x *.sh
 ./setup.sh
 ```
 
-* **Fresh machine:** installs everything, runs the wizard, offers a systemd service.
-* **Run it again later:** it detects the existing install and asks
-  1. **Update** (`./setup.sh --update` skips the question) – keeps config, world, plugins and backups. It first **stops any running copy** of the bot/server, then pulls new panel code (`git pull`; if the folder came from a ZIP it offers to link it to your GitHub repo), refreshes dependencies, updates the Paper build and all plugins, installs missing core plugins (DiscordSRV), migrates old settings and restarts the service. The existing panel message is **edited, not re-posted**.
-  2. **Clean reinstall** (`./setup.sh --clean`) – you must type `DELETE`. Removes config, server (world + plugins), Java and venv (and optionally backups), deletes the old panel message, then runs the wizard again.
+**Fresh machine:** installs everything, runs the wizard, then asks how to start the bot (terminal / background / not now). **systemd is never touched unless you ask for it** (see below).
 
-Start manually with `./start.sh`; re-run only the wizard with `./start.sh --setup`.
-Only one bot can run per folder (a lock prevents duplicates, which would otherwise each post a panel).
+### Updating (your data is never touched)
+```bash
+git pull   # or just:
+./setup.sh --update
+```
+Updates **only the bot code, scripts and Python dependencies**. Your `config.json`, `server/` (world, plugins, server.properties), `data/`, `backups/` and the downloaded Java stay **byte-for-byte identical** – they are all git-ignored, so `git pull` cannot overwrite them.
+It stops any old copy of the bot first (a leftover copy is what causes duplicate panels), makes a safety copy `config.json.bak`, and the existing panel message is edited, not re-posted.
+Want the newest Paper build and plugins too? That is a separate, optional step because it changes files inside `server/`:
+`./setup.sh --update --with-server` (or answer *y* when the menu asks). Plugins can also be updated from Discord with `/plugin → Update all`, the Minecraft version with `/version`.
+
+Running `./setup.sh` on an existing install shows a menu: **1) Update** · **2) Clean reinstall** (type `DELETE`; wipes everything and starts over) · **3) Cancel**.
+
+### Running it: terminal, background, or systemd (optional)
+| | |
+|---|---|
+| `./start.sh` | run in this terminal (Ctrl+C stops it) |
+| `./start.sh --bg` | run in the **background**, survives closing the terminal. Logs: `tail -f logs/bot.log` |
+| `./stop.sh` | stop the bot **and** the Minecraft server safely (world is saved first) |
+| `./setup.sh --service` | *optional:* install a systemd service (auto-start on boot). Never done automatically |
+| `./setup.sh --remove-service` | remove that service again |
+
+Only one bot can run per folder (a lock prevents duplicates). Re-run only the wizard with `./start.sh --setup`.
 
 ## ☠️ Kill / uninstall – leave the machine clean
 
@@ -69,15 +86,19 @@ the bot **must** be invited with the `applications.commands` scope. Make sure th
 `/ram` · `/version` (change Minecraft version, auto-backup) · `/world upload` (replace world from .zip attachment or direct link) · `/world reset` ·
 `/backup create|list|restore|delete|schedule` · `/players` · `/whitelist` · `/op` `/deop` `/kick` `/ban` `/pardon` · `/command`
 
-## Auto-start on join
-While the server is offline the bot listens on the Minecraft port (25565). The server list shows "Offline – join to start the server!";
-an actual join attempt shows "starting, reconnect in a minute" and boots the server. Pings never start it, and if the whitelist is on only
-whitelisted names can. Toggle with `/autostart`. Java Edition only (Bedrock/Geyser players can use the panel's Start button).
-Combined with `/autoshut` the server sleeps when empty and wakes when someone knocks.
+## Auto-shutdown (`/autoshut`)
+Stops the server only after **no players for the set time (default 3 min)**. It never trusts the console log alone: besides the join/leave lines it asks the server itself (status ping + `list`), and **it will not stop unless the server confirms zero players** – if it can't verify, it keeps the server running and re-checks.
+
+## Auto-start on join (Java **and** Bedrock)
+While the server is offline the bot listens on the Minecraft ports (TCP 25565, and UDP 19132 when Geyser is installed).
+* **Java:** the server list shows your MOTD + "Offline – join to start the server!". A real join attempt shows "starting, reconnect in a minute" and boots the server. With the whitelist on, only whitelisted names can wake it.
+* **Bedrock:** the server appears in the Bedrock server list as offline; tapping join starts the server. Retry after about a minute. (After the server has been online once, the bot remembers Geyser's real version info so the offline entry matches exactly.)
+* Pings never start the server. Toggle with `/autostart`. Combined with `/autoshut` the server sleeps when empty and wakes when someone knocks.
 
 ## Notes
-- Open **TCP 25565** (Java) and **UDP 19132** (Bedrock/Geyser).
+- Open **TCP 25565** (Java) and **UDP 19132** (Bedrock/Geyser) on your firewall/host.
 - `config.json` holds your token and is git-ignored – never commit it. `server/`, `backups/`, `runtime/`, `data/` are ignored too.
 - MOTD / icon / most properties apply after a restart. Game rules apply live and on every start.
 - `/world upload` accepts a zip containing the world folder (the folder with `level.dat`, zipped alone or inside a folder). Bukkit-style `_nether` / `_the_end` folders are picked up too.
 - Bedrock whitelist: `/whitelist add player:.Name`. Windows: use WSL2.
+- `./kill.sh` removes everything (see above), including `logs/`.

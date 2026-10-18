@@ -182,20 +182,21 @@ def run(cfg: Config) -> None:
     say("Open ports on your firewall/host: TCP 25565 (Java)" + (" and UDP 19132 (Bedrock)" if "geyser" in plugins else "") + ".\n")
 
 
-def migrate(cfg: Config) -> None:
-    """Drop settings/files from older versions (the existing panel message id is KEPT, so it is edited, not re-posted)."""
-    from .config import DATA_DIR
-    for key in ("panel_title", "panel_note", "server_address"):
-        cfg.data.pop(key, None)
-    (DATA_DIR / "panel_icon.png").unlink(missing_ok=True)
-    cfg.save()
-
-
 def update(cfg: Config) -> None:
-    """Keep config, world and plugins; update Paper build + plugins + wiring."""
+    """Bot-code update check. READ-ONLY: never writes config.json, server/, data/ or backups/."""
+    from .config import SERVER_DIR
+    say(f"\n{B}══════════ Update check ══════════{X}")
+    say(f"  config.json   {G}kept as is{X}  (new options automatically use safe defaults)")
+    say(f"  server/       {G}kept as is{X}  (world, plugins, server.properties untouched)")
+    say(f"  Minecraft     Paper {cfg['mc_version'] or '?'} · world folder present: {'yes' if SERVER_DIR.exists() else 'no'}")
+    say(f"  panel message {G}kept{X}  (it will be edited, not re-posted)")
+    say(f"\n{G}✓ Only the bot code, scripts and Python dependencies were updated.{X}\n")
+
+
+def update_server(cfg: Config) -> None:
+    """OPTIONAL: update the Paper build + plugins (changes files inside server/). Config, world, backups are untouched."""
     say(f"\n{B}══════════ Updating ══════════{X}")
     problems = 0
-    migrate(cfg)
     version = cfg["mc_version"]
     if not version:
         say(f"  {Y}! No Minecraft version in config.json – skipping the Paper update.{X}")

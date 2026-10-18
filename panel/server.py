@@ -11,15 +11,20 @@ from typing import Optional
 
 import psutil
 
-from . import backups, installer, props
+from . import backups, installer, mcproto, props
 from .config import SERVER_DIR
 
 log = logging.getLogger("panel.server")
 
 ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
 PFX = r"^\[[\d:]+(?: INFO\]|\] \[[^\]]*/INFO\]): "
+# Several independent signals, so a plugin that rewrites the join/leave MESSAGE can't fool us:
 JOIN_RE = re.compile(PFX + r"(\S+) joined the game$")
+LOGIN_RE = re.compile(PFX + r"(\S+?)\[/[^\]]*\] logged in with entity id")     # vanilla, always logged
 LEAVE_RE = re.compile(PFX + r"(\S+) left the game$")
+LOST_RE = re.compile(PFX + r"(\S+) lost connection: ")                          # vanilla, always logged
+LIST_PATTERNS = [re.compile(r"There are (\d+)\s*(?:of a max of|out of maximum|out of|of)\s*(\d+)", re.I),
+                 re.compile(r"(\d+)\s*/\s*(\d+)\s+players", re.I)]
 PFX_RE = re.compile(PFX)
 
 # Aikar-style G1GC flags (safe subset that works on Java 11-25)
@@ -41,6 +46,7 @@ class ServerManager:
         self.online_at: Optional[float] = None
         self.empty_since: Optional[float] = None
         self.exit_code: Optional[int] = None
+        self.count_hint: Optional[int] = None   # last count reported by the server itself (status ping)
         self.stopping = False
         self.callbacks: dict = defaultdict(list)
         self.pre_start: list = []          # async hooks awaited before the JVM is launched (free the port)
@@ -142,6 +148,7 @@ class ServerManager:
         self.proc = None
         self._ps = None
         self.players.clear()
+        self.count_hint = None
         self.online_at = None
         self.empty_since = None
         self._set_state("offline")
@@ -153,18 +160,24 @@ class ServerManager:
             cap.append(line)
         if self._save_evt and "Saved the game" in line:
             self._save_evt.set()
-        m = JOIN_RE.match(line)
+        m = JOIN_RE.match(line) or LOGIN_RE.match(line)
         if m:
+            is_new = m.group(1) not in self.players
             self.players.add(m.group(1))
             self.empty_since = None
-            self._fire("join", m.group(1))
+            self.count_hint = None
+            if is_new:
+                self._fire("join", m.group(1))
             return
-        m = LEAVE_RE.match(line)
+        m = LEAVE_RE.match(line) or LOST_RE.match(line)
         if m:
+            was_in = m.group(1) in self.players
             self.players.discard(m.group(1))
+            self.count_hint = None
             if not self.players and self.state == "online":
                 self.empty_since = time.time()
-            self._fire("leave", m.group(1))
+            if was_in:
+                self._fire("leave", m.group(1))
             return
         if self.state == "starting" and "Done (" in line and "For help" in line:
             self.online_at = self.empty_since = time.time()
@@ -249,6 +262,37 @@ class ServerManager:
     async def shutdown(self) -> None:
         if self.proc is not None and self.state != "offline":
             await self.stop()
+
+    # ── asking the server itself how many players are on ─────
+    def player_total(self) -> int:
+        """Best known number of players (console tracking AND what the server last reported)."""
+        return max(len(self.players), self.count_hint or 0)
+
+    async def query_online(self) -> Optional[int]:
+        """Players online according to the server's own status reply (None = couldn't ask)."""
+        host = self.properties().get("server-ip") or "127.0.0.1"
+        st = await mcproto.status_ping(host, self.port())
+        try:
+            return int(st["players"]["online"]) if st else None
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    async def count_players(self) -> Optional[int]:
+        """Authoritative count: status ping, then the `list` command as a second opinion. None = unknown."""
+        counts = []
+        n = await self.query_online()
+        if n is not None:
+            counts.append(n)
+        if not n:  # None or 0 -> also ask the console (covers hide-online-players and odd status replies)
+            try:
+                for line in await self.run("list", 1.5):
+                    hit = next((p.search(line) for p in LIST_PATTERNS if p.search(line)), None)
+                    if hit:
+                        counts.append(int(hit.group(1)))
+                        break
+            except Exception:  # noqa: BLE001
+                pass
+        return max(counts) if counts else None
 
     # ── backups ─────────────────────────────────────────────
     async def backup(self, prefix: str = "backup") -> Path:

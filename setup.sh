@@ -2,8 +2,11 @@
 # ─────────────────────────────────────────────────────────────
 #  Minecraft Panel Bot – automatic setup / update / clean reinstall
 #    ./setup.sh            fresh install, or (if already installed) asks: update / clean reinstall
-#    ./setup.sh --update   update without asking   (keeps config, world, plugins, backups)
+#    ./setup.sh --update   update ONLY the bot code/scripts/dependencies (config, world, plugins, backups untouched)
+#        add --with-server to ALSO update Paper + plugins (optional, changes files inside server/)
 #    ./setup.sh --clean    clean reinstall         (asks you to type DELETE)
+#    ./setup.sh --service  OPTIONAL: install the systemd service (auto-start on boot)   [never done automatically]
+#    ./setup.sh --remove-service   remove that service again
 #  To remove EVERYTHING from the machine use ./kill.sh
 # ─────────────────────────────────────────────────────────────
 set -euo pipefail
@@ -87,24 +90,15 @@ ensure_venv() {
   ok "Dependencies installed"
 }
 
-# ── finishing: (re)start the bot ──
-finish() {  # finish fresh|update
-  local mode="${1:-fresh}" ans=""
-  echo
-  if service_exists; then
-    $SUDO systemctl daemon-reload || true
-    $SUDO systemctl restart minecraft-panel
-    ok "Service restarted (logs: journalctl -u minecraft-panel -f)"
-    exit 0
-  fi
-  if [ "$mode" = "fresh" ] && command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] && { [ -n "$SUDO" ] || [ "$(id -u)" -eq 0 ]; }; then
-    read -r -p "Install as a systemd service (auto-start on boot, auto-restart on crash)? [y/N] " ans || ans=""
-    case "$ans" in
-      [Yy]*)
-        local run_user workdir
-        run_user="$(stat -c '%U' . 2>/dev/null || id -un)"
-        workdir="$(pwd)"
-        $SUDO tee "$UNIT" >/dev/null <<UNITEOF
+# ── systemd: strictly OPT-IN (only with ./setup.sh --service) ──
+install_service() {
+  command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ] || die "systemd is not available on this machine."
+  [ -x .venv/bin/python ] || die "Run ./setup.sh first."
+  local run_user workdir
+  run_user="$(stat -c '%U' . 2>/dev/null || id -un)"
+  workdir="$(pwd)"
+  stop_everything
+  $SUDO tee "$UNIT" >/dev/null <<UNITEOF
 [Unit]
 Description=Minecraft Panel Discord Bot
 After=network-online.target
@@ -123,17 +117,44 @@ TimeoutStopSec=120
 [Install]
 WantedBy=multi-user.target
 UNITEOF
-        $SUDO systemctl daemon-reload
-        $SUDO systemctl enable --now minecraft-panel
-        ok "Service installed and started (logs: journalctl -u minecraft-panel -f)"
-        exit 0 ;;
-    esac
+  $SUDO systemctl daemon-reload
+  $SUDO systemctl enable --now minecraft-panel
+  ok "Service installed and started (logs: journalctl -u minecraft-panel -f)"
+  echo "   remove it any time with: ./setup.sh --remove-service"
+}
+
+remove_service() {
+  service_exists || { ok "No systemd service is installed – nothing to remove."; return 0; }
+  info "Removing the systemd service…"
+  $SUDO systemctl stop minecraft-panel 2>/dev/null || true
+  $SUDO systemctl disable minecraft-panel 2>/dev/null || true
+  $SUDO rm -f "$UNIT"
+  $SUDO systemctl daemon-reload 2>/dev/null || true
+  $SUDO systemctl reset-failed minecraft-panel 2>/dev/null || true
+  ok "Service removed (the bot itself is untouched – start it with ./start.sh)"
+}
+
+# ── finishing: choose how to start (systemd is never touched unless it already exists) ──
+finish() {
+  local ans=""
+  echo
+  if service_exists; then
+    $SUDO systemctl daemon-reload || true
+    $SUDO systemctl restart minecraft-panel
+    ok "Your existing systemd service was restarted (logs: journalctl -u minecraft-panel -f)"
+    exit 0
   fi
-  read -r -p "Start the bot now? [Y/n] " ans || ans=""
+  echo "How do you want to start the bot?"
+  echo "  1) Here in this terminal   (stops when you close it)"
+  echo "  2) In the background       (keeps running after you close the terminal; stop with ./stop.sh)"
+  echo "  3) Not now                 (later: ./start.sh  or  ./start.sh --bg)"
+  read -r -p "Choose [1-3] (default 1): " ans || ans=3
   case "$ans" in
-    [Nn]*) ok "Done. Start it any time with ./start.sh" ;;
-    *)     exec ./start.sh ;;
+    2) ./start.sh --bg ;;
+    3) ok "Done. Start it any time with ./start.sh or ./start.sh --bg" ;;
+    *) exec ./start.sh ;;
   esac
+  echo "(Optional, only if you want it: ./setup.sh --service  → auto-start on boot via systemd.)"
 }
 
 # ── update ──
@@ -159,14 +180,21 @@ update_code() {
   fi
 }
 
-do_update() {
-  info "Updating – config, world, plugins and backups are kept"
+do_update() {  # do_update [with-server|ask|no]
+  local with_server="${1:-no}" ans=""
+  info "Updating the bot code only – config, world, plugins and backups stay exactly as they are"
+  [ -f config.json ] && cp -p config.json config.json.bak && ok "Safety copy of your config: config.json.bak"
   stop_everything          # a still-running old bot is what causes duplicate panels / port clashes
   ensure_system            # (installs git if missing)
-  update_code
+  update_code              # only files tracked in git change; config.json, server/, data/, backups/, runtime/ are git-ignored
   ensure_venv              # after the pull: requirements.txt may have changed
-  .venv/bin/python -m panel --update || warn "The update step reported a problem (see above)"
-  finish update
+  .venv/bin/python -m panel --update || warn "The update check reported a problem (see above)"
+  if [ "$with_server" = "ask" ]; then
+    read -r -p "Also update Paper + plugins to their newest builds? This changes files inside server/. [y/N] " ans || ans=""
+    case "$ans" in [Yy]*) with_server="with-server" ;; *) with_server="no" ;; esac
+  fi
+  if [ "$with_server" = "with-server" ]; then .venv/bin/python -m panel --update-server || warn "Server update reported a problem (see above)"; fi
+  finish
 }
 
 # ── clean reinstall ──
@@ -190,23 +218,28 @@ fresh_install() {
   ensure_venv
   info "First-time configuration"
   .venv/bin/python -m panel --setup
-  finish fresh
+  finish
 }
 
 main() {
   case "${1:-}" in
-    --update) [ -f config.json ] || die "Nothing to update – no config.json here."; do_update; return ;;
-    --clean)  do_clean; return ;;
+    --update)
+      [ -f config.json ] || die "Nothing to update – no config.json here."
+      if [ "${2:-}" = "--with-server" ]; then do_update with-server; else do_update no; fi
+      return ;;
+    --clean)          do_clean; return ;;
+    --service)        install_service; return ;;
+    --remove-service) remove_service; return ;;
   esac
   if [ -f config.json ]; then
     echo -e "${C_Y}An existing installation was found.${C_0} What do you want to do?"
-    echo "  1) Update          – keep config, world & plugins; update the panel code, Paper build and plugins"
+    echo "  1) Update          – update ONLY the bot code/scripts; your config, world, plugins and backups stay untouched"
     echo "  2) Clean reinstall – delete the old install and set everything up from scratch"
     echo "  3) Cancel"
     local choice=""
     read -r -p "Choose [1-3]: " choice || choice=3
     case "$choice" in
-      1) do_update ;;
+      1) do_update ask ;;
       2) do_clean ;;
       *) info "Cancelled." ;;
     esac

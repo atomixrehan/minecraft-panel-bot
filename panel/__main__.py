@@ -30,11 +30,16 @@ def main() -> None:
     if "--cleanup" in args:          # used by setup.sh / kill.sh: delete the panel message from Discord
         from .wizard import cleanup
         return cleanup(cfg)
-    if "--update" in args:           # used by setup.sh "Update" option
+    if "--update" in args:           # used by setup.sh: read-only summary after the code was updated
         if not cfg.is_configured():
             raise SystemExit("Nothing to update – not configured yet.")
         from .wizard import update
         return update(cfg)
+    if "--update-server" in args:    # OPTIONAL: newest Paper build + plugins (touches server/)
+        if not cfg.is_configured():
+            raise SystemExit("Nothing to update – not configured yet.")
+        from .wizard import update_server
+        return update_server(cfg)
     if "--setup" in args or not cfg.is_configured():
         if not sys.stdin.isatty():
             raise SystemExit("Not configured yet. Run ./setup.sh (or ./start.sh --setup) in a terminal first.")

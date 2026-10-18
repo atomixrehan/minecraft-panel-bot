@@ -389,7 +389,7 @@ def help_pages(bot) -> dict:
         "server": ("🖥️ Server", 0x5865F2, [
             ("/server `action`", "start · stop · restart · kill (kill = force stop)."),
             ("/autoshut `[enabled]` `[minutes]`", "Stops the server when nobody is online. `/autoshut` alone toggles it. Default 3 min."),
-            ("/autostart `[enabled]`", "Start the server automatically when someone tries to join while it's offline (Java). Toggles if empty."),
+            ("/autostart `[enabled]`", "Start the server automatically when someone tries to join while it's offline (Java + Bedrock). Toggles if empty."),
             ("/autorestart `hours`", "Restart every N hours (0 = off)."),
             ("/ram `amount`", "e.g. `/ram 4G`. Applies on next start."),
             ("/version `[version]`", "Show or change the Minecraft version (server must be offline, backup is made first)."),
@@ -510,7 +510,7 @@ class Configure(commands.Cog):
         await interaction.followup.send(
             f"{icon} Auto-start on join is **{'ON' if cfg['autostart'] else 'OFF'}**.\n`{self.bot.wake.status_text()}`\n"
             "*When the server is offline, joining shows “starting – reconnect in a minute” and boots it. "
-            "Server-list pings never start it. If the whitelist is on, only whitelisted names can wake it. Java Edition only.*",
+            "Server-list pings never start it. Java: with the whitelist on, only whitelisted names can wake it. Bedrock (needs Geyser): tapping join wakes it, then retry in about a minute.*",
             ephemeral=True)
 
     @app_commands.command(name="autorestart", description="Restart the server every N hours (0 = off)")
