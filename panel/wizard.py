@@ -1,17 +1,25 @@
-"""Interactive first-run setup (token, channels, version, plugin presets)."""
+"""Interactive setup.
+
+* First run: asks each question ONCE and saves every answer immediately – if you stop half-way, the next run
+  continues with only the unanswered questions.
+* Later (`./start.sh --setup`): a menu to change ONE thing (token, channels, RAM, version, plugins, server-list text…).
+* `./start.sh --install`: repairs/finishes the server download with no questions.
+Starting the bot never asks anything once it is configured.
+"""
 from __future__ import annotations
 
 import json
 import urllib.error
 import urllib.request
 
-from . import installer
-from .config import ID_KEYS, SERVER_DIR, Config, parse_ram
+from . import installer, props
+from .config import SERVER_DIR, Config, parse_ram
 
 B, G, Y, R, X = "\033[1;36m", "\033[1;32m", "\033[1;33m", "\033[1;31m", "\033[0m"
+PROPS_FILE = SERVER_DIR / "server.properties"
 
 
-def say(msg: str) -> None:
+def say(msg: str = "") -> None:
     print(msg, flush=True)
 
 
@@ -53,21 +61,40 @@ def api(path: str, token: str):
         return 0, None
 
 
-def ask_token(cfg: Config) -> str:
+def mark(cfg: Config, step: str) -> None:
+    """Remember that a question was answered (and save right away)."""
+    if step not in cfg["setup_steps"]:
+        cfg["setup_steps"].append(step)
+    cfg.save()
+
+
+def step_done(cfg: Config, step: str) -> bool:
+    return "*" in cfg["setup_steps"] or step in cfg["setup_steps"]
+
+
+# ───────────────────────── the questions ─────────────────────────
+def step_token(cfg: Config) -> None:
     while True:
         token = ask("Discord bot token", cfg["token"] or None)
         st, data = api("/users/@me", token)
         if st == 200:
             say(f"  {G}✓ Logged in as {data.get('username')}{X}")
             say(f"  Invite the bot (needs the applications.commands scope):\n  {B}https://discord.com/oauth2/authorize?client_id={data.get('id')}&permissions=536955968&scope=bot%20applications.commands{X}")
-            return token
+            break
         if st == 0:
             say(f"  {Y}! Could not reach Discord to verify the token – continuing.{X}")
-            return token
+            break
         say(f"  {R}! Discord rejected that token (HTTP {st}).{X}")
+    cfg["token"] = token
+    mark(cfg, "token")
 
 
-def ask_channel(label: str, token: str, default):
+def step_role(cfg: Config) -> None:
+    cfg["op_role_id"] = int(ask("OP role ID", cfg["op_role_id"], snowflake))
+    mark(cfg, "role")
+
+
+def _ask_channel(label: str, token: str, default):
     while True:
         cid = int(ask(label, default or None, snowflake))
         st, data = api(f"/channels/{cid}", token)
@@ -81,6 +108,33 @@ def ask_channel(label: str, token: str, default):
             return cid, None
 
 
+def step_channels(cfg: Config) -> None:
+    token = cfg["token"]
+    old_panel = cfg["panel_channel_id"]
+    panel, guild = _ask_channel("Panel channel ID", token, cfg["panel_channel_id"])
+    cfg["panel_channel_id"] = panel
+    cfg["crosschat_channel_id"], _ = _ask_channel("Cross-chat channel ID", token, cfg["crosschat_channel_id"])
+    cfg["console_channel_id"], _ = _ask_channel("Console channel ID", token, cfg["console_channel_id"])
+    cfg["configure_channel_id"], _ = _ask_channel("Configure channel ID", token, cfg["configure_channel_id"])
+    if panel != old_panel:
+        cfg["panel_message_id"] = 0   # the old panel lives in another channel
+    if guild and cfg["op_role_id"]:
+        st, roles = api(f"/guilds/{guild}/roles", token)
+        if st == 200 and cfg["op_role_id"] not in {int(r["id"]) for r in roles}:
+            say(f"  {Y}! The OP role ID wasn't found in that server – double-check it.{X}")
+    mark(cfg, "channels")
+
+
+def step_eula(cfg: Config) -> None:
+    say("\nMinecraft requires you to accept the EULA: https://aka.ms/MinecraftEULA")
+    cfg["eula"] = yes("Do you accept the Minecraft EULA?", bool(cfg["eula"]))
+    if cfg["eula"]:
+        mark(cfg, "eula")
+    else:
+        say(f"{R}The server cannot run without accepting the EULA – you can accept it later with ./start.sh --setup.{X}")
+        cfg.save()
+
+
 def default_ram() -> int:
     try:
         import psutil
@@ -90,42 +144,17 @@ def default_ram() -> int:
         return 2048
 
 
-def run(cfg: Config) -> None:
-    say(f"\n{B}══════════ Minecraft Panel Bot – setup ══════════{X}")
-    say("You need: a bot token, the OP role ID and 4 channel IDs (panel, cross-chat, console, configure).")
-    say(f"{Y}Reminder:{X} in the Developer Portal → Bot, enable BOTH 'Message Content Intent' and 'Server Members Intent'")
-    say("(this bot and the DiscordSRV cross-chat plugin both use them).\n")
-
-    token = ask_token(cfg)
-    role = int(ask("OP role ID", cfg["op_role_id"], snowflake))
-    panel, guild = ask_channel("Panel channel ID", token, cfg["panel_channel_id"])
-    cross, _ = ask_channel("Cross-chat channel ID", token, cfg["crosschat_channel_id"])
-    console, _ = ask_channel("Console channel ID", token, cfg["console_channel_id"])
-    conf, _ = ask_channel("Configure channel ID", token, cfg["configure_channel_id"])
-
-    if guild:
-        st, roles = api(f"/guilds/{guild}/roles", token)
-        if st == 200 and role not in {int(r["id"]) for r in roles}:
-            say(f"  {Y}! That role ID wasn't found in the server – double-check it.{X}")
-
-    cfg["token"], cfg["op_role_id"] = token, role
-    cfg["panel_channel_id"], cfg["crosschat_channel_id"] = panel, cross
-    cfg["console_channel_id"], cfg["configure_channel_id"] = console, conf
-    cfg["panel_message_id"] = 0
-
-    say("\nMinecraft requires you to accept the EULA: https://aka.ms/MinecraftEULA")
-    cfg["eula"] = yes("Do you accept the Minecraft EULA?", bool(cfg["eula"]))
-    if not cfg["eula"]:
-        say(f"{R}The server cannot run without accepting the EULA. Re-run with ./start.sh --setup.{X}")
-
-    def ram_check(v):
+def step_ram(cfg: Config) -> None:
+    def check(v):
         try:
             parse_ram(v)
         except ValueError as e:
             return str(e)
+    cfg["ram_mb"] = parse_ram(ask("RAM for the server (e.g. 4G)", f"{cfg['ram_mb'] if cfg['setup_done'] else default_ram()}M", check))
+    mark(cfg, "ram")
 
-    cfg["ram_mb"] = parse_ram(ask("RAM for the server (e.g. 4G)", f"{default_ram()}M", ram_check))
 
+def step_version(cfg: Config) -> None:
     say("\nFetching Paper versions…")
     versions: list = []
     try:
@@ -135,11 +164,13 @@ def run(cfg: Config) -> None:
     if versions:
         latest = installer.latest_stable_version(versions)
         say(f"  Latest stable: {G}{latest}{X} · recent: {', '.join(versions[:8])}")
-        cfg["mc_version"] = ask("Minecraft version", cfg["mc_version"] or latest,
-                                lambda v: None if v in versions else "Unknown version")
+        cfg["mc_version"] = ask("Minecraft version", cfg["mc_version"] or latest, lambda v: None if v in versions else "Unknown version")
     else:
         cfg["mc_version"] = ask("Minecraft version (e.g. 1.21.4)", cfg["mc_version"] or None)
+    mark(cfg, "version")
 
+
+def step_plugins(cfg: Config) -> None:
     say(f"\n{B}Plugin presets{X}")
     say("  1) Install recommended  (" + ", ".join(c[1] for c in installer.CATALOG if c[3]) + ")")
     say("  2) Custom               (pick from a list)")
@@ -147,7 +178,7 @@ def run(cfg: Config) -> None:
     choice = ask("Choose 1/2/3", "1", lambda v: None if v in ("1", "2", "3") else "Enter 1, 2 or 3")
     plugins: list = []
     if choice == "1":
-        plugins = installer.RECOMMENDED
+        plugins = list(installer.RECOMMENDED)
     elif choice == "2":
         for i, (_, name, desc, rec) in enumerate(installer.CATALOG, 1):
             say(f"  {i:>2}) {name}{' *' if rec else ''} – {desc}")
@@ -155,31 +186,132 @@ def run(cfg: Config) -> None:
         for part in raw.replace(" ", "").split(","):
             if part.isdigit() and 1 <= int(part) <= len(installer.CATALOG):
                 plugins.append(installer.CATALOG[int(part) - 1][0])
+    cfg["plugins"] = list(dict.fromkeys(plugins))
+    say(f"{G}DiscordSRV{X} (cross-chat) is always installed and auto-configured with your token and cross-chat channel.")
+    mark(cfg, "plugins")
 
-    say(f"\n{G}DiscordSRV{X} (cross-chat) is always installed and auto-configured with your token and cross-chat channel.")
-    plugins = list(dict.fromkeys(installer.CORE_PLUGINS + plugins))
 
-    cfg["setup_done"] = True
-    cfg.save()
-    say(f"\n{G}✓ Configuration saved to config.json{X}\n")
+def step_options(cfg: Config) -> None:
+    say(f"\n{B}Server details{X} (press Enter to keep the default)")
+    current = props.read(PROPS_FILE)
+    motd = ask("Server name / MOTD shown in the Minecraft server list (&a = colours, \\n = 2nd line)", current.get("motd") or "A Minecraft Server")
+    props.write_key(PROPS_FILE, "motd", props.motd_value(motd), raw=True)
+    maxp = ask("Max players", current.get("max-players") or "20", lambda v: None if v.isdigit() and 1 <= int(v) <= 1000 else "Enter a number 1-1000")
+    props.write_key(PROPS_FILE, "max-players", maxp)
+    a = cfg["autoshut"]
+    a["enabled"] = yes("Auto-shutdown when nobody is online?", a["enabled"])
+    if a["enabled"]:
+        a["minutes"] = int(ask("  …after how many idle minutes?", a["minutes"], lambda v: None if v.isdigit() and 1 <= int(v) <= 240 else "Enter 1-240"))
+    cfg["autostart"] = yes("Auto-start the server when someone tries to join while it's offline?", bool(cfg["autostart"]))
+    mark(cfg, "options")
 
-    # ── install everything ──
-    say(f"{B}Installing server…{X}")
+
+STEPS = [
+    ("token", step_token), ("role", step_role), ("channels", step_channels), ("eula", step_eula),
+    ("ram", step_ram), ("version", step_version), ("plugins", step_plugins), ("options", step_options),
+]
+
+
+# ───────────────────────── install / repair ─────────────────────────
+def install(cfg: Config, log=say) -> bool:
+    """Download/finish everything the server needs. Asks nothing. Safe to run again at any time."""
+    say(f"\n{B}Installing server…{X}")
+    ok = True
     try:
         SERVER_DIR.mkdir(parents=True, exist_ok=True)
-        installer.ensure_java(installer.required_java(cfg["mc_version"]), say)
-        if installer.installed_version() != cfg["mc_version"] or not (SERVER_DIR / "server.jar").exists():
-            installer.download_server(cfg["mc_version"], say)
-        if plugins:
-            installer.install_many(plugins, cfg["mc_version"], say)
-        installer.ensure_server_icon(say)
-        if cfg["eula"]:
-            installer.bootstrap(cfg, say)
+        installer.ensure_java(installer.required_java(cfg["mc_version"]), log)
+        first_time = not (SERVER_DIR / "server.jar").exists()
+        installer.ensure_server_files(cfg, log, with_plugins=True)
+        if cfg["eula"] and first_time:
+            installer.bootstrap(cfg, log)   # one boot so plugins generate their configs, then they get wired together
+        elif installer.patch_configs(cfg):
+            log("  plugin configs wired together")
     except Exception as e:  # noqa: BLE001
+        ok = False
         say(f"{R}! Install step failed: {e}{X}")
-        say("  The bot will still start; fix the problem and run ./start.sh --setup again.")
+    missing = installer.missing_plugins(cfg)
+    if missing:
+        ok = False
+        say(f"{Y}! Not installed yet: {', '.join(missing)}{X}")
+    cfg["install_done"] = bool(ok and (SERVER_DIR / "server.jar").exists())
+    cfg.save()
+    if cfg["install_done"]:
+        say(f"{G}✓ Server files are installed.{X}")
+        say("Open ports on your firewall/host: TCP 25565 (Java)" + (" and UDP 19132 (Bedrock)" if "geyser" in cfg["plugins"] else "") + ".")
+    else:
+        say(f"{Y}Some downloads did not finish. That's fine: the bot finishes them itself the next time you press Start,")
+        say(f"or run  ./start.sh --install  to retry now. Nothing needs to be re-entered.{X}")
+    return cfg["install_done"]
+
+
+# ───────────────────────── entry points ─────────────────────────
+def run(cfg: Config) -> None:
+    """First run (or resume of an interrupted one): ask only what hasn't been answered yet."""
+    pending = [(sid, fn) for sid, fn in STEPS if not step_done(cfg, sid)]
+    say(f"\n{B}══════════ Minecraft Panel Bot – setup ══════════{X}")
+    if len(pending) < len(STEPS):
+        say(f"{G}Found an unfinished setup – continuing where you left off.{X} Your earlier answers are kept.\n")
+    else:
+        say("You need: a bot token, the OP role ID and 4 channel IDs (panel, cross-chat, console, configure).")
+        say(f"{Y}Reminder:{X} in the Developer Portal → Bot, enable BOTH 'Message Content Intent' and 'Server Members Intent'")
+        say("(this bot and the DiscordSRV cross-chat plugin both use them). Every answer is saved as you go.\n")
+    for sid, fn in pending:
+        fn(cfg)
+    cfg["setup_done"] = True
+    cfg.save()
+    say(f"\n{G}✓ Configuration saved to config.json{X}")
+    install(cfg)
     say(f"\n{G}✓ Setup complete.{X}")
-    say("Open ports on your firewall/host: TCP 25565 (Java)" + (" and UDP 19132 (Bedrock)" if "geyser" in plugins else "") + ".\n")
+
+
+def reconfigure(cfg: Config) -> None:
+    """Menu: change one setting without going through everything again."""
+    def do_version():
+        old = installer.installed_version()
+        step_version(cfg)
+        if cfg["mc_version"] != old:
+            say(f"{Y}Tip: make a backup first (/backup create). Downgrading a world can corrupt it.{X}")
+            if yes(f"Download Paper {cfg['mc_version']} now?", True):
+                try:
+                    installer.download_server(cfg["mc_version"], say)
+                    say("Updating plugins for the new version…")
+                    installer.update_all(cfg["mc_version"], say)
+                except Exception as e:  # noqa: BLE001
+                    say(f"{R}! {e}{X}")
+
+    def do_plugins():
+        step_plugins(cfg)
+        installer.install_many(installer.missing_plugins(cfg), cfg["mc_version"], say)
+
+    def do_all():
+        for _, fn in STEPS:
+            fn(cfg)
+        install(cfg)
+
+    items = [
+        ("1", "Bot token", lambda: step_token(cfg)),
+        ("2", "OP role + the 4 channels", lambda: (step_role(cfg), step_channels(cfg))),
+        ("3", "RAM", lambda: step_ram(cfg)),
+        ("4", "Minecraft version", do_version),
+        ("5", "Plugins (recommended set / custom picks)", do_plugins),
+        ("6", "Server name (MOTD), max players, auto-shutdown, auto-start", lambda: step_options(cfg)),
+        ("7", "Minecraft EULA", lambda: step_eula(cfg)),
+        ("8", "Repair / finish the server download (no questions)", lambda: install(cfg)),
+        ("9", "Redo EVERYTHING (the full wizard)", do_all),
+    ]
+    say(f"\n{B}══════════ Change a setting ══════════{X}")
+    while True:
+        say("")
+        for key, label, _ in items:
+            say(f"  {key}) {label}")
+        say("  0) Done")
+        choice = ask("What do you want to change?", "0", lambda v: None if v in [i[0] for i in items] + ["0"] else "Pick a number from the list")
+        if choice == "0":
+            break
+        next(fn for key, _, fn in items if key == choice)()
+        cfg.save()
+        say(f"{G}✓ Saved.{X}")
+    say(f"\n{G}Done.{X} Start the bot with ./start.sh   (it never asks questions again).\n")
 
 
 def update(cfg: Config) -> None:

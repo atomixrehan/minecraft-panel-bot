@@ -28,6 +28,9 @@ DEFAULTS: dict = {
     "ram_mb": 2048,
     "eula": False,
     "setup_done": False,
+    "setup_steps": [],             # wizard steps already answered (so an interrupted setup RESUMES instead of starting over)
+    "install_done": False,         # server jar + chosen plugins fully installed
+    "plugins": [],                 # plugin keys picked in the wizard (kept so a repair can re-install them)
     "autoshut": {"enabled": True, "minutes": 3},
     "autostart": True,             # start the server when someone tries to join while it is offline
     "autorestart_hours": 0,        # 0 = off
@@ -58,7 +61,13 @@ class Config:
     def load(self) -> None:
         if self.path.exists():
             with open(self.path, encoding="utf-8") as f:
-                _merge(self.data, json.load(f))
+                raw = json.load(f)
+            _merge(self.data, raw)
+            if raw.get("setup_done"):  # config from an older version: everything was already answered/installed
+                if "setup_steps" not in raw:
+                    self.data["setup_steps"] = ["*"]
+                if "install_done" not in raw:
+                    self.data["install_done"] = True
 
     def save(self) -> None:
         tmp = self.path.with_suffix(".tmp")

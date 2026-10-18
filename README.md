@@ -31,12 +31,16 @@ Running `./setup.sh` on an existing install shows a menu: **1) Update** · **2) 
 | | |
 |---|---|
 | `./start.sh` | run in this terminal (Ctrl+C stops it) |
+| `./start.sh --setup` | **menu to change ONE setting** (token, role/channels, RAM, version, plugins, server name/MOTD, max players, auto-shutdown/auto-start, EULA). Run it while the bot is stopped |
+| `./start.sh --install` | finish/repair the server download, **no questions** (the bot also does this by itself when you press Start) |
 | `./start.sh --bg` | run in the **background**, survives closing the terminal. Logs: `tail -f logs/bot.log` |
 | `./stop.sh` | stop the bot **and** the Minecraft server safely (world is saved first) |
 | `./setup.sh --service` | *optional:* install a systemd service (auto-start on boot). Never done automatically |
 | `./setup.sh --remove-service` | remove that service again |
 
-Only one bot can run per folder (a lock prevents duplicates). Re-run only the wizard with `./start.sh --setup`.
+Only one bot can run per folder (a lock prevents duplicates).
+
+**`./start.sh` never asks questions once the bot is configured.** The first-time questions are asked once; every answer is saved immediately, so if you stop half-way the next run **continues with only the unanswered ones**. If a download failed during setup (no internet, API hiccup), nothing has to be re-entered: pressing **Start** finishes the installation by itself, or run `./start.sh --install`.
 
 ## ☠️ Kill / uninstall – leave the machine clean
 
@@ -63,9 +67,9 @@ It only touches processes whose working directory is inside this folder, so othe
 3. Invite with scopes `bot` + `applications.commands`; permissions: View Channels, Send Messages, Embed Links, Read Message History, Add Reactions, **Manage Webhooks** (player-head chat messages).
 4. Create an OP role and 4 channels: `#panel`, `#cross-chat`, `#console`, `#configure` (hide console/configure from non-OPs).
 
-### Wizard asks
+### Setup questions (asked once)
 Bot token · OP role ID · Panel / Cross-chat / Console / Configure channel IDs · EULA · RAM · version ·
-plugins: **Install recommended** (Geyser, Floodgate, ViaVersion, ViaBackwards, ViaRewind, SkinsRestorer, spark) / **Custom** / **None**.
+server name (MOTD) · max players · auto-shutdown (on/off + idle minutes) · auto-start on join · plugins: **Install recommended** (Geyser, Floodgate, ViaVersion, ViaBackwards, ViaRewind, SkinsRestorer, spark) / **Custom** / **None**.
 **DiscordSRV is always installed** and auto-configured (same token, cross-chat channel, webhook chat with player heads).
 
 ## Channels

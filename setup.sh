@@ -221,6 +221,11 @@ fresh_install() {
   finish
 }
 
+configured() {  # true only when config.json exists AND the wizard finished
+  [ -f config.json ] && [ -x .venv/bin/python ] &&
+  .venv/bin/python -c 'import sys; from panel.config import Config; sys.exit(0 if Config().is_configured() else 1)' 2>/dev/null
+}
+
 main() {
   case "${1:-}" in
     --update)
@@ -231,7 +236,10 @@ main() {
     --service)        install_service; return ;;
     --remove-service) remove_service; return ;;
   esac
-  if [ -f config.json ]; then
+  if [ -f config.json ] && ! configured; then
+    info "Found an unfinished setup – continuing where you left off (your earlier answers are kept)"
+    fresh_install
+  elif [ -f config.json ]; then
     echo -e "${C_Y}An existing installation was found.${C_0} What do you want to do?"
     echo "  1) Update          – update ONLY the bot code/scripts; your config, world, plugins and backups stay untouched"
     echo "  2) Clean reinstall – delete the old install and set everything up from scratch"

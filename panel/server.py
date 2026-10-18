@@ -49,6 +49,7 @@ class ServerManager:
         self.count_hint: Optional[int] = None   # last count reported by the server itself (status ping)
         self.stopping = False
         self.callbacks: dict = defaultdict(list)
+        self._heal_tried = False
         self.pre_start: list = []          # async hooks awaited before the JVM is launched (free the port)
         self._tasks: set = set()
         self._lock = asyncio.Lock()
@@ -98,12 +99,13 @@ class ServerManager:
         async with self._lock:
             if self.state != "offline":
                 return False, f"Server is already {self.state}."
-            if not (SERVER_DIR / "server.jar").exists():
-                return False, "server.jar is missing – run `./start.sh --setup`."
+            if not self.cfg["eula"]:
+                return False, "The Minecraft EULA has not been accepted – run `./start.sh --setup` and pick *Minecraft EULA*."
             self._set_state("starting")
         try:
             for hook in self.pre_start:
                 await hook()
+            await self._self_heal()
             await asyncio.to_thread(installer.patch_configs, self.cfg)  # DiscordSRV token/channel, Geyser auth
             java = await asyncio.to_thread(installer.ensure_java, installer.required_java(self.cfg["mc_version"] or "1.21"), log.info)
             ram = int(self.cfg["ram_mb"])
@@ -127,6 +129,22 @@ class ServerManager:
             self._ps = None
         asyncio.ensure_future(self._read_loop(self.proc))
         return True, "Server is starting…"
+
+    async def _self_heal(self) -> None:
+        """Download whatever a failed first install left missing (server.jar, chosen plugins) – no questions asked."""
+        jar_missing = not (SERVER_DIR / "server.jar").exists()
+        plugins_todo = (not self.cfg["install_done"]) and not self._heal_tried
+        if not (jar_missing or plugins_todo):
+            return
+        self._heal_tried = True
+        self._fire("line", "[panel] Finishing the installation (downloading missing server files)…")
+        ok = await asyncio.to_thread(installer.ensure_server_files, self.cfg, log.info, plugins_todo)
+        if not ok:
+            raise RuntimeError("server.jar could not be downloaded – check the internet connection and try Start again")
+        if not installer.missing_plugins(self.cfg):
+            self.cfg["install_done"] = True
+            self.cfg.save()
+        self._fire("line", "[panel] Installation complete.")
 
     async def _read_loop(self, proc) -> None:
         try:

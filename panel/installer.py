@@ -424,6 +424,40 @@ def update_server_build(version: str, log: Callable = print) -> bool:
     return True
 
 
+def plugin_present(key: str) -> bool:
+    return PLUGIN_DIR.exists() and any(key.lower() in p.name.lower() for p in PLUGIN_DIR.glob("*.jar"))
+
+
+def wanted_plugins(cfg) -> list:
+    return list(dict.fromkeys(CORE_PLUGINS + list(cfg["plugins"])))
+
+
+def missing_plugins(cfg) -> list:
+    return [k for k in wanted_plugins(cfg) if not plugin_present(k)]
+
+
+def ensure_server_files(cfg, log: Callable = print, with_plugins: bool = False) -> bool:
+    """Repair a half-finished install WITHOUT asking anything: server.jar, eula.txt, icon (+ chosen plugins).
+    Returns True if server.jar exists afterwards."""
+    SERVER_DIR.mkdir(parents=True, exist_ok=True)
+    if not (SERVER_DIR / "server.jar").exists():
+        version = cfg["mc_version"]
+        if not version:
+            version = latest_stable_version(paper_versions())
+            cfg["mc_version"] = version
+            cfg.save()
+        download_server(version, log)
+    eula = SERVER_DIR / "eula.txt"
+    if cfg["eula"] and (not eula.exists() or "eula=true" not in eula.read_text()):
+        eula.write_text("eula=true\n")
+    ensure_server_icon(log)
+    if with_plugins:
+        todo = missing_plugins(cfg)
+        if todo:
+            install_many(todo, cfg["mc_version"], log)
+    return (SERVER_DIR / "server.jar").exists()
+
+
 def bootstrap(cfg, log: Callable = print) -> None:
     """Accept EULA, boot once so plugins generate their configs, then patch them."""
     SERVER_DIR.mkdir(parents=True, exist_ok=True)

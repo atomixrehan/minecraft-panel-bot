@@ -1,32 +1,12 @@
-import os
 import sys
 
-from .config import DATA_DIR, Config
-
-_lock_file = None  # keep a reference so the lock lives as long as the process
-
-
-def acquire_lock() -> None:
-    """Only ONE bot per install folder (two copies would each post their own panel)."""
-    global _lock_file
-    try:
-        import fcntl
-    except ImportError:  # Windows
-        return
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _lock_file = open(DATA_DIR / "bot.lock", "w")
-    try:
-        fcntl.flock(_lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except OSError:
-        raise SystemExit("Another copy of the panel bot is already running from this folder.\n"
-                         "Stop it first (systemctl stop minecraft-panel, or ./kill.sh) and try again.")
-    _lock_file.write(str(os.getpid()))
-    _lock_file.flush()
+from .config import Config
 
 
 def main() -> None:
     cfg = Config()
     args = sys.argv[1:]
+
     if "--cleanup" in args:          # used by setup.sh / kill.sh: delete the panel message from Discord
         from .wizard import cleanup
         return cleanup(cfg)
@@ -40,14 +20,37 @@ def main() -> None:
             raise SystemExit("Nothing to update – not configured yet.")
         from .wizard import update_server
         return update_server(cfg)
-    if "--setup" in args or not cfg.is_configured():
+    if "--install" in args:          # finish/repair the server download, no questions
+        if not cfg.is_configured():
+            raise SystemExit("Not configured yet – run ./setup.sh first.")
+        from .wizard import install
+        ok = install(cfg)
+        raise SystemExit(0 if ok else 1)
+
+    if "--setup" in args:            # change settings (menu), or continue an unfinished first setup. Never starts the bot.
+        from .lock import is_running
+        if is_running():
+            raise SystemExit("The bot is running. Stop it first (./stop.sh), then run --setup – "
+                             "otherwise it would overwrite your changes.")
         if not sys.stdin.isatty():
-            raise SystemExit("Not configured yet. Run ./setup.sh (or ./start.sh --setup) in a terminal first.")
+            raise SystemExit("--setup needs an interactive terminal.")
+        from .wizard import reconfigure, run
+        if cfg.is_configured():
+            reconfigure(cfg)
+        else:
+            run(cfg)
+        return
+
+    if not cfg.is_configured():      # very first start: ask once (resumes if interrupted), then run
+        if not sys.stdin.isatty():
+            raise SystemExit("Not configured yet. Run ./setup.sh (or ./start.sh) in a terminal first.")
         from .wizard import run
         run(cfg)
         if not cfg.is_configured():
             raise SystemExit(1)
-    acquire_lock()
+
+    from .lock import acquire
+    acquire()
     from .bot import main as run_bot
     run_bot(cfg)
 
