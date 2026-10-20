@@ -17,13 +17,16 @@ chmod +x *.sh
 
 ### Updating (your data is never touched)
 ```bash
-git pull   # or just:
-./setup.sh --update
+./setup.sh --update        # (or run ./setup.sh and pick 1)
 ```
-Updates **only the bot code, scripts and Python dependencies**. Your `config.json`, `server/` (world, plugins, server.properties), `data/`, `backups/` and the downloaded Java stay **byte-for-byte identical** – they are all git-ignored, so `git pull` cannot overwrite them.
-It stops any old copy of the bot first (a leftover copy is what causes duplicate panels), makes a safety copy `config.json.bak`, and the existing panel message is edited, not re-posted.
+Updates **only the bot code, scripts and Python dependencies**. Your `config.json`, `server/` (world, plugins, server.properties), `data/`, `backups/` and the downloaded Java stay **byte-for-byte identical** – they are all git-ignored.
+What it does, in order: safety copy `config.json.bak` → stops the bot and Minecraft server gracefully (world saved) → fetches the new code → continues with the **new** `setup.sh` → refreshes dependencies → **checks that the new code loads, and rolls back to the previous version automatically if it doesn't** → restarts the bot (and starts the Minecraft server again if it was running before).
+
+It copes with the usual git problems by itself: `chmod +x` on the scripts (never counts as a local change), folders owned by another user ("dubious ownership"), clones without an upstream branch, a force-pushed remote, and local edits to code files (a copy is saved to `logs/local-changes-*.patch` and a `backup-before-update-*` branch, then the new code is applied). If it can't reach the remote it says so plainly and changes nothing.
+**No git** (folder came from a ZIP)? Unzip the new version over the old folder – your config/world aren't in the ZIP – then run `./setup.sh --update`. Or give it your GitHub URL when it asks, and later updates are automatic.
+
 Want the newest Paper build and plugins too? That is a separate, optional step because it changes files inside `server/`:
-`./setup.sh --update --with-server` (or answer *y* when the menu asks). Plugins can also be updated from Discord with `/plugin → Update all`, the Minecraft version with `/version`.
+`./setup.sh --update --with-server` (or answer *y* when asked). Plugins can also be updated from Discord with `/plugin → Update all`, the Minecraft version with `/version`.
 
 Running `./setup.sh` on an existing install shows a menu: **1) Update** · **2) Clean reinstall** (type `DELETE`; wipes everything and starts over) · **3) Cancel**.
 

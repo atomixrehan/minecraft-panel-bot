@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 import time
 from collections import deque
 from typing import Optional
@@ -11,7 +12,7 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from . import installer
-from .config import Config
+from .config import DATA_DIR, Config
 from .configure import Configure
 from .server import ServerManager
 from .wake import WakeListener
@@ -134,6 +135,7 @@ class PanelBot(commands.Bot):
         self._ready_once = False
         self._restarting = False
         self._backing_up = False
+        self._closing: Optional[asyncio.Future] = None
 
     # ── helpers ─────────────────────────────────────────────
     def is_op(self, user) -> bool:
@@ -212,10 +214,27 @@ class PanelBot(commands.Bot):
             log.exception("Slash command sync failed")
         await self._init_panel()
         await self.wake.sync()
+        await self._resume_after_update()
         self.panel_loop.start()
         self.console_loop.start()
         self.maintenance.start()
         asyncio.ensure_future(self._load_versions())
+
+    async def _resume_after_update(self) -> None:
+        """./setup.sh --update leaves a marker if the Minecraft server was running – start it again."""
+        marker = DATA_DIR / ".resume_server"
+        try:
+            if not marker.exists():
+                return
+            fresh = time.time() - marker.stat().st_mtime < 3600
+            marker.unlink(missing_ok=True)
+            if fresh and self.mc.state == "offline":
+                await self.send_console("🔄 The bot was updated – starting the Minecraft server again (it was running before).")
+                ok, msg = await self.mc.start()
+                if not ok:
+                    await self.send_console(f"⚠️ {msg}")
+        except Exception:  # noqa: BLE001
+            log.exception("resume after update")
 
     async def _load_versions(self) -> None:
         try:
@@ -452,6 +471,12 @@ class PanelBot(commands.Bot):
             self._backing_up = False
 
     async def close(self) -> None:
+        """Shut down once, no matter how many times it is requested: Minecraft is stopped (world saved) first."""
+        if self._closing is None:
+            self._closing = asyncio.ensure_future(self._do_close())
+        await asyncio.shield(self._closing)
+
+    async def _do_close(self) -> None:
         try:
             await self.wake.close()
             await self.mc.shutdown()
@@ -462,9 +487,22 @@ class PanelBot(commands.Bot):
 def main(cfg: Config) -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s")
     bot = PanelBot(cfg)
+
+    async def runner() -> None:
+        loop = asyncio.get_running_loop()
+        for sig in (signal.SIGINT, signal.SIGTERM):   # ./stop.sh, systemctl stop, Ctrl+C -> save the world, then exit
+            try:
+                loop.add_signal_handler(sig, lambda: asyncio.ensure_future(bot.close()))
+            except (NotImplementedError, RuntimeError):
+                pass
+        async with bot:
+            await bot.start(cfg["token"])
+
     try:
-        bot.run(cfg["token"], log_handler=None)
+        asyncio.run(runner())
     except discord.LoginFailure:
-        raise SystemExit("Invalid bot token. Run ./start.sh --setup to re-enter it.")
+        raise SystemExit("Invalid bot token. Run ./start.sh --setup and pick 'Bot token'.")
     except discord.PrivilegedIntentsRequired:
-        raise SystemExit("Enable 'Message Content Intent' for your bot in the Discord Developer Portal → Bot.")
+        raise SystemExit("Enable 'Message Content Intent' (and 'Server Members Intent') for your bot in the Developer Portal → Bot.")
+    except KeyboardInterrupt:
+        pass
